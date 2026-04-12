@@ -22,4 +22,4 @@ NEWTON-0021 - Code coverage SHOULD be maintained or improved
 NEWTON-0022 - Release builds MUST compile successfully on all target platforms
 NEWTON-0023 - You MUST assume git is installed on the user machine and MUST NOT check for git presence
 NEWTON-0024 - You SHOULD NOT adopt an extremely defensive coding style with excessive validation
-NEWTON-0025 - Each command and subcommand MUST have a proper descriptive help message (about/long_about as needed) including at least one example (e.g. in after_help)
+NEWTON-0025 - Each command and subcommand MUST have a proper descriptive help message (about/long_about as needed) including at least one example (e.g. in after_help); `init`, `ingest`, `validate`, and `export-skill` MUST document optional `-C` / `--wiki-root` (default cwd) where applicable

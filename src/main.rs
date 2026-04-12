@@ -1,20 +1,21 @@
 //! agwiki — agent-based wiki CLI.
 
-use anyhow::Result;
-use clap::{Parser, Subcommand};
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 use agwiki::export_skill::{run_export, ExportOptions};
-use agwiki::ingest::{run_agent, Runner};
-use agwiki::prep::prep;
-use agwiki::toolkit::{default_prompt_path, expand_ingest_prompt, resolve_toolkit_root};
-use agwiki::upkeep::{check_links, list_orphans, validate_wiki_root};
+use agwiki::ingest::{resolve_ingest_source, run_aikit};
+use agwiki::init::run_init;
+use agwiki::toolkit::{expand_ingest_prompt, require_wiki_ingest_prompt};
+use agwiki::upkeep::validate_wiki_root;
+use agwiki::validate::validate_wiki;
 
 #[derive(Parser)]
 #[command(
     name = "agwiki",
     version,
-    about = "Agent-based wiki: prep, ingest, link checks, skill export"
+    about = "CLI for agent-driven markdown wikis (init, ingest, validate, skill export)"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -23,139 +24,170 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Resolve and print absolute path to a .md ingest source
+    /// Create a new wiki root: `agwiki.toml`, directory tree, and default `ingest.md`
     #[command(
-        after_help = "Example:\n  agwiki prep -C /path/to/wiki ./raw/note.md\n  agwiki prep -C /path/to/wiki --raw-only ./raw/note.md"
+        after_help = "Example:\n  agwiki init\n  agwiki init ./my-wiki\n  Fails if the target directory exists and is not empty."
     )]
-    Prep(PrepArgs),
-    /// Expand ingest prompt and run aikit or opencode from the wiki root
+    Init(InitArgs),
+    /// Run ingest via `aikit run` with `--events` (NDJSON progress on stdout; see `aikit run --help`).
+    ///
+    /// Expands `{{INGEST_PATH}}` and `{{WIKI_ROOT}}` in `<wiki-root>/ingest.md`. **`-a` / `--agent` is required** (no default). Optional `-m`, `--stream` as for `aikit run`.
     #[command(
-        after_help = "Requires AGWIKI_ROOT (or FASTWIKI_ROOT / WIKIFY_ROOT) pointing at the agwiki toolkit.\n\nExample:\n  export AGWIKI_ROOT=/path/to/agwiki\n  agwiki ingest -C /path/to/content-wiki ./raw/note.md\n  agwiki ingest -C /path/to/wiki --runner opencode ./raw/note.md"
+        after_help = "Example:\n  agwiki ingest -a opencode ./raw/note.md\n  agwiki ingest -C /path/to/wiki -a claude ./raw/note.md\n  agwiki ingest --stream -a opencode ./raw/note.md\n  agwiki ingest -a opencode -m MODEL ./raw/note.md\n  `-C` / `--wiki-root` defaults to the current working directory when omitted."
     )]
     Ingest(IngestArgs),
-    /// Report broken wikilinks and relative markdown links under wiki/
+    /// Check broken wikilinks, relative markdown links, and orphan wiki pages
     #[command(
-        after_help = "Example:\n  agwiki check-links -C /path/to/wiki\n  Exits with status 1 if any broken link is found."
+        after_help = "Example:\n  agwiki validate\n  agwiki validate -C /path/to/wiki\n  agwiki validate --format json\n  Exits with status 1 if any broken link or orphan page is found.\n  `-C` / `--wiki-root` defaults to the current working directory when omitted."
     )]
-    CheckLinks(WikiRootArgs),
-    /// List wiki pages with no incoming wikilink (excluding entry pages)
-    #[command(after_help = "Example:\n  agwiki orphans -C /path/to/wiki")]
-    Orphans(WikiRootArgs),
-    /// Build skill/references and SKILL.md from template + wiki index
+    Validate(ValidateArgs),
+    /// Mirror `wiki/<top-level-dir>/` into the skill bundle and refresh the wiki index inside `SKILL.md` (agwiki HTML comment markers)
     #[command(
-        after_help = "Example:\n  agwiki export-skill -C /path/to/wiki --prune\n  agwiki export-skill -C /path/to/wiki --dry-run"
+        long_about = "Copies markdown from each immediate subdirectory of wiki/ into skill/references/<name>/. \
+Reads wiki/index.md to build a link index. Updates SKILL.md by replacing the block between \
+<!-- agwiki:generated-index --> and <!-- /agwiki:generated-index -->, or appends that block if missing. \
+Runs wiki validation and prints warnings on stderr if there are broken links or orphans (export still succeeds).",
+        after_help = "Example:\n  agwiki export-skill\n  agwiki export-skill --prune\n  agwiki export-skill -C /path/to/wiki --dry-run\n  `-C` / `--wiki-root` defaults to the current working directory when omitted.\n  Use `agwiki validate` in CI for a non-zero exit on issues."
     )]
     ExportSkill(ExportArgs),
 }
 
 #[derive(clap::Args)]
 struct WikiRootArgs {
-    #[arg(long = "wiki-root", short = 'C', value_name = "DIR", env = "WIKI_ROOT")]
+    #[arg(
+        long = "wiki-root",
+        short = 'C',
+        value_name = "DIR",
+        help = "Root of the content repository; must contain a wiki/ directory (default: current working directory)"
+    )]
     wiki_root: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]
-struct PrepArgs {
+struct InitArgs {
+    #[arg(
+        default_value = ".",
+        help = "Directory to create or populate as wiki root (must be empty if it already exists)"
+    )]
+    dir: PathBuf,
+}
+
+#[derive(ValueEnum, Clone, Copy, Default, Debug, PartialEq, Eq)]
+enum ValidateFormat {
+    #[default]
+    Text,
+    Json,
+}
+
+#[derive(clap::Args)]
+struct ValidateArgs {
     #[command(flatten)]
     wiki: WikiRootArgs,
-    #[arg(long)]
-    raw_only: bool,
-    file: PathBuf,
+    #[arg(long, value_enum, default_value_t = ValidateFormat::Text)]
+    format: ValidateFormat,
 }
 
 #[derive(clap::Args)]
 struct IngestArgs {
     #[command(flatten)]
     wiki: WikiRootArgs,
-    #[arg(long, default_value = "aikit", value_parser = parse_runner)]
-    runner: Runner,
+    #[arg(
+        short = 'a',
+        long = "agent",
+        value_name = "NAME",
+        help = "Agent for `aikit run -a` (required; e.g. opencode, claude, codex, gemini)"
+    )]
+    agent: String,
+    #[arg(
+        short = 'm',
+        long = "model",
+        value_name = "MODEL",
+        help = "Optional model for `aikit run -m`"
+    )]
+    model: Option<String>,
+    #[arg(
+        long,
+        help = "Pass `--stream` to `aikit run` (with `--events`) for agent-native streaming where supported"
+    )]
+    stream: bool,
+    #[arg(help = "Markdown source file (resolved from cwd, must exist, .md extension)")]
     file: PathBuf,
-}
-
-fn parse_runner(s: &str) -> Result<Runner, String> {
-    match s.to_ascii_lowercase().as_str() {
-        "aikit" => Ok(Runner::Aikit),
-        "opencode" => Ok(Runner::Opencode),
-        _ => Err("expected 'aikit' or 'opencode'".into()),
-    }
 }
 
 #[derive(clap::Args)]
 struct ExportArgs {
     #[command(flatten)]
     wiki: WikiRootArgs,
-    #[arg(long, value_name = "PATH")]
-    skill_dir: Option<PathBuf>,
-    #[arg(long, value_name = "PATH")]
-    template: Option<PathBuf>,
-    #[arg(long, value_name = "PATH")]
-    output: Option<PathBuf>,
-    #[arg(long, value_name = "PATH")]
-    index: Option<PathBuf>,
-    #[arg(long, default_value = "concepts,topics,projects")]
-    sections: String,
-    #[arg(long)]
+    #[arg(
+        long = "skill-root",
+        value_name = "DIR",
+        help_heading = "Skill bundle",
+        help = "Agent Skill directory (default: <wiki-root>/skill)"
+    )]
+    skill_root: Option<PathBuf>,
+    #[arg(
+        long = "skill-md",
+        value_name = "FILE",
+        help = "SKILL.md path to create or update (default: <skill-root>/SKILL.md)"
+    )]
+    skill_md: Option<PathBuf>,
+    #[arg(
+        long,
+        help_heading = "Behavior",
+        help = "Print planned copies/prunes and generated index; do not write files"
+    )]
     dry_run: bool,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Remove files under skill/references/ when the source .md no longer exists in the wiki"
+    )]
     prune: bool,
-    #[arg(long)]
-    rewrite_wikilinks: bool,
 }
 
 fn resolve_wiki_root(opt: Option<PathBuf>) -> Result<PathBuf> {
     let p = opt
-        .or_else(|| std::env::var("WIKI_ROOT").ok().map(PathBuf::from))
-        .ok_or_else(|| anyhow::anyhow!("set --wiki-root/-C or WIKI_ROOT"))?;
+        .map(Ok)
+        .unwrap_or_else(|| std::env::current_dir().context("current directory"))?;
     validate_wiki_root(&p)
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Prep(a) => {
-            let root = resolve_wiki_root(a.wiki.wiki_root)?;
-            let path = prep(&root, &a.file, a.raw_only)?;
-            println!("{}", path.display());
+        Commands::Init(a) => {
+            run_init(&a.dir)?;
         }
         Commands::Ingest(a) => {
             let root = resolve_wiki_root(a.wiki.wiki_root)?;
-            let ingest_path = prep(&root, &a.file, false)?;
-            let toolkit = resolve_toolkit_root()?;
-            let prompt_path = std::env::var("WIKI_INGEST_PROMPT")
-                .ok()
-                .map(PathBuf::from)
-                .unwrap_or_else(|| default_prompt_path(&toolkit));
-            let prompt = expand_ingest_prompt(&toolkit, &root, &ingest_path, &prompt_path)?;
-            run_agent(&root, &prompt, a.runner)?;
-        }
-        Commands::CheckLinks(a) => {
-            let root = resolve_wiki_root(a.wiki_root)?;
-            let errs = check_links(&root)?;
-            for e in &errs {
-                println!("{}", e);
+            let ingest_path = resolve_ingest_source(&a.file)?;
+            let prompt_path = require_wiki_ingest_prompt(&root)?;
+            let prompt = expand_ingest_prompt(&root, &ingest_path, &prompt_path)?;
+            let agent = a.agent.trim();
+            if agent.is_empty() {
+                return Err(anyhow::anyhow!("--agent must not be empty"));
             }
-            if !errs.is_empty() {
+            let model = a.model.as_deref().map(str::trim).filter(|s| !s.is_empty());
+            run_aikit(&root, &prompt, agent, model, a.stream)?;
+        }
+        Commands::Validate(a) => {
+            let root = resolve_wiki_root(a.wiki.wiki_root)?;
+            let report = validate_wiki(&root)?;
+            match a.format {
+                ValidateFormat::Text => println!("{}", report.to_text()),
+                ValidateFormat::Json => println!("{}", report.to_json()?),
+            }
+            if !report.is_clean() {
                 std::process::exit(1);
-            }
-        }
-        Commands::Orphans(a) => {
-            let root = resolve_wiki_root(a.wiki_root)?;
-            for p in list_orphans(&root)? {
-                println!("{}", p.strip_prefix(&root).unwrap_or(&p).display());
             }
         }
         Commands::ExportSkill(a) => {
             let root = resolve_wiki_root(a.wiki.wiki_root)?;
             run_export(ExportOptions {
                 wiki_root: &root,
-                skill_dir: a.skill_dir.as_deref(),
-                template: a.template.as_deref(),
-                output: a.output.as_deref(),
-                index: a.index.as_deref(),
-                sections: &a.sections,
+                skill_root: a.skill_root.as_deref(),
+                skill_md: a.skill_md.as_deref(),
                 dry_run: a.dry_run,
                 prune: a.prune,
-                rewrite_wikilinks: a.rewrite_wikilinks,
             })?;
         }
     }

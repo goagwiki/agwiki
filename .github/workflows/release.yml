@@ -202,6 +202,15 @@ jobs:
           agwiki.exe --version
           ```
 
+          ## CLI overview
+
+          - **`agwiki init [DIR]`** — Create a wiki root (`agwiki.toml`, default folders, `ingest.md`).
+          - **`agwiki ingest`**, **`validate`**, **`export-skill`** — Optional **`-C` / `--wiki-root`**; if omitted, uses the current directory (must contain **`wiki/`**).
+          - **`agwiki validate`** — Broken links and orphan pages; **`--format json`** for machine output; exits **1** if anything fails.
+          - **`agwiki export-skill`** — Mirrors each top-level `wiki/<dir>/` into `skill/references/` and refreshes the generated index inside `SKILL.md` (HTML comment markers). Warns on stderr if validation finds issues; does not fail the command.
+
+          Full documentation: https://github.com/goagwiki/agwiki/blob/main/README.md
+
           For more information, visit: https://github.com/goagwiki/agwiki
           README_EOF
 

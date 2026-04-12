@@ -4,7 +4,7 @@ Follow the embedded default wiki rules below (folder layout, rules, ingest steps
 
 # Purpose
 
-Default rules for markdown content wikis consumed by **wikify** (`wiki-ingest`). Paths are relative to the wiki root (`WIKI_ROOT`).
+Default rules for markdown content wikis used with **agwiki** `ingest`. Paths in prose below are relative to the wiki root; the substituted `{{WIKI_ROOT}}` value is an absolute path for the agent.
 
 # Rules
 

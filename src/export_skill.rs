@@ -1,4 +1,4 @@
-//! Mirror wiki sections into `skill/references/` and generate `SKILL.md` from template + index.
+//! Mirror wiki sections into `skill/references/` and update `SKILL.md` inside agwiki marker comments.
 
 use anyhow::{bail, Context, Result};
 use regex::Regex;
@@ -7,6 +7,13 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+
+use crate::validate::validate_wiki;
+
+/// Opening HTML comment: generated wiki index is inserted or replaced between this and [`GENERATED_INDEX_END`].
+pub const GENERATED_INDEX_START: &str = "<!-- agwiki:generated-index -->";
+/// Closing HTML comment for the generated block.
+pub const GENERATED_INDEX_END: &str = "<!-- /agwiki:generated-index -->";
 
 fn wikilink_full_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
@@ -18,31 +25,32 @@ fn heading_re() -> &'static Regex {
     R.get_or_init(|| Regex::new(r"^(#{2,3})\s+(.+?)\s*$").unwrap())
 }
 
-/// Inputs for [`run_export`]: wiki tree, optional paths, section list, and post-copy options.
+/// Inputs for [`run_export`].
 pub struct ExportOptions<'a> {
     /// Content wiki root (contains `wiki/`).
     pub wiki_root: &'a Path,
-    pub skill_dir: Option<&'a Path>,
-    pub template: Option<&'a Path>,
-    pub output: Option<&'a Path>,
-    pub index: Option<&'a Path>,
-    /// Comma-separated top-level names under `wiki/` to mirror (e.g. `concepts,topics,projects`).
-    pub sections: &'a str,
+    /// Agent Skill bundle root; default `<wiki-root>/skill`.
+    pub skill_root: Option<&'a Path>,
+    /// Path to `SKILL.md` to create or update; default `<skill-root>/SKILL.md`.
+    pub skill_md: Option<&'a Path>,
     pub dry_run: bool,
     pub prune: bool,
-    pub rewrite_wikilinks: bool,
 }
 
-fn first_heading_title(md_text: &str) -> Option<String> {
-    for line in md_text.lines() {
-        if let Some(rest) = line.strip_prefix('#') {
-            let t = rest.trim_start_matches('#').trim();
-            if !t.is_empty() {
-                return Some(t.to_string());
-            }
-        }
+/// Top-level directory names under `wiki/` (sorted), each mirrored to `skill/references/<name>/`.
+pub fn wiki_mirror_sections(wiki_root: &Path) -> Result<Vec<String>> {
+    let wiki = wiki_root.join("wiki");
+    if !wiki.is_dir() {
+        bail!("missing wiki directory: {}", wiki.display());
     }
-    None
+    let mut names: Vec<String> = fs::read_dir(&wiki)
+        .with_context(|| wiki.display().to_string())?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    names.sort();
+    Ok(names)
 }
 
 fn copy_section(
@@ -80,7 +88,7 @@ fn copy_section(
 
 fn walk_md(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    if let Ok(rd) = fs::read_dir(dir) {
+    if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
             let p = e.path();
             if p.is_dir() {
@@ -115,64 +123,6 @@ fn prune_section(wiki_root: &Path, skill_dir: &Path, section: &str, dry_run: boo
     Ok(())
 }
 
-fn build_slug_maps(
-    skill_dir: &Path,
-    sections: &[String],
-) -> (HashMap<String, PathBuf>, HashMap<String, PathBuf>) {
-    let mut stem_map: HashMap<String, PathBuf> = HashMap::new();
-    let mut full_map: HashMap<String, PathBuf> = HashMap::new();
-    let ref_root = skill_dir.join("references");
-    for section in sections {
-        let sec_dir = ref_root.join(section);
-        if !sec_dir.is_dir() {
-            continue;
-        }
-        let mut paths: Vec<_> = walk_md(&sec_dir);
-        paths.sort();
-        for p in paths {
-            let Ok(rel_from_ref) = p.strip_prefix(&ref_root) else {
-                continue;
-            };
-            let key = rel_from_ref.to_string_lossy().replace('\\', "/");
-            let key = key.strip_suffix(".md").unwrap_or(&key).to_string();
-            full_map.entry(key.clone()).or_insert_with(|| p.clone());
-            let stem = p
-                .file_stem()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-            stem_map.entry(stem).or_insert_with(|| p.clone());
-        }
-    }
-    (stem_map, full_map)
-}
-
-fn resolve_wikilink_target(
-    raw: &str,
-    stem_map: &HashMap<String, PathBuf>,
-    full_map: &HashMap<String, PathBuf>,
-) -> Option<PathBuf> {
-    let raw = raw.trim();
-    if raw.is_empty() {
-        return None;
-    }
-    if full_map.contains_key(raw) {
-        return full_map.get(raw).cloned();
-    }
-    let key = raw.strip_suffix(".md").unwrap_or(raw);
-    if full_map.contains_key(key) {
-        return full_map.get(key).cloned();
-    }
-    if raw.contains('/') {
-        return full_map.get(raw).cloned();
-    }
-    stem_map.get(raw).cloned()
-}
-
-fn markdown_link_escape(text: &str) -> String {
-    text.replace('\\', "\\\\").replace(']', "\\]")
-}
-
 fn titleish_stem(s: &str) -> String {
     Path::new(s)
         .file_stem()
@@ -188,60 +138,6 @@ fn titleish_stem(s: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-fn rewrite_wikilinks_in_file(
-    path: &Path,
-    stem_map: &HashMap<String, PathBuf>,
-    full_map: &HashMap<String, PathBuf>,
-    dry_run: bool,
-) -> Result<()> {
-    let text = fs::read_to_string(path)?;
-    let re = wikilink_full_re();
-    let mut new_text = String::with_capacity(text.len());
-    let mut last = 0usize;
-    for cap in re.captures_iter(&text) {
-        let m = cap.get(0).unwrap();
-        new_text.push_str(&text[last..m.start()]);
-        let target = cap.get(1).map(|x| x.as_str()).unwrap_or("").trim();
-        let alias = cap.get(2).map(|x| x.as_str());
-        let repl = if let Some(dest) = resolve_wikilink_target(target, stem_map, full_map) {
-            if dest.is_file() {
-                let parent = path.parent().unwrap_or(Path::new("."));
-                let rel = pathdiff::diff_paths(&dest, parent)
-                    .unwrap_or_else(|| dest.strip_prefix(parent).unwrap_or(&dest).to_path_buf());
-                let rel = rel.to_string_lossy().replace('\\', "/");
-                let label = alias
-                    .map(|s| s.trim())
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| {
-                        let inner = fs::read_to_string(&dest).unwrap_or_default();
-                        first_heading_title(&inner).unwrap_or_else(|| {
-                            dest.file_stem()
-                                .map(|s| s.to_string_lossy().to_string())
-                                .unwrap_or_default()
-                        })
-                    });
-                format!("[{}]({})", markdown_link_escape(&label), rel)
-            } else {
-                m.as_str().to_string()
-            }
-        } else {
-            m.as_str().to_string()
-        };
-        new_text.push_str(&repl);
-        last = m.end();
-    }
-    new_text.push_str(&text[last..]);
-    if new_text != text {
-        if dry_run {
-            println!("rewrite wikilinks in {}", path.display());
-        } else {
-            fs::write(path, new_text)?;
-        }
-    }
-    Ok(())
 }
 
 type IndexGroups = Vec<(String, Vec<(String, String)>)>;
@@ -392,50 +288,102 @@ fn render_generated_block(groups: &IndexGroups, orphan_refs: &[String]) -> Strin
     format!("{}\n", s.trim_end())
 }
 
-/// Mirror `wiki/<sections>/` into `skill/references/`, append generated index to `SKILL.md`.
+/// Insert or replace the block between [`GENERATED_INDEX_START`] and [`GENERATED_INDEX_END`].
+pub fn merge_skill_generated_index(existing: &str, generated_body: &str) -> Result<String> {
+    let gen_trim = generated_body.trim_end();
+    let replacement = format!(
+        "{}\n{}\n{}\n",
+        GENERATED_INDEX_START, gen_trim, GENERATED_INDEX_END
+    );
+
+    if existing.contains(GENERATED_INDEX_START) {
+        let si = existing
+            .find(GENERATED_INDEX_START)
+            .expect("contains start");
+        let after_start = si + GENERATED_INDEX_START.len();
+        let tail = &existing[after_start..];
+        let Some(rel_ei) = tail.find(GENERATED_INDEX_END) else {
+            bail!(
+                "SKILL.md: found {} but no closing {}",
+                GENERATED_INDEX_START,
+                GENERATED_INDEX_END
+            );
+        };
+        let abs_ei = after_start + rel_ei;
+        let abs_after_end = abs_ei + GENERATED_INDEX_END.len();
+        let before = &existing[..si];
+        let after = &existing[abs_after_end..];
+        return Ok(format!("{}{}{}", before, replacement, after));
+    }
+
+    if existing.contains(GENERATED_INDEX_END) {
+        bail!(
+            "SKILL.md: found {} without {}",
+            GENERATED_INDEX_END,
+            GENERATED_INDEX_START
+        );
+    }
+
+    let sep = if existing.is_empty() || existing.ends_with("\n\n") {
+        ""
+    } else if existing.ends_with('\n') {
+        "\n"
+    } else {
+        "\n\n"
+    };
+    Ok(format!("{existing}{sep}{replacement}"))
+}
+
+fn warn_if_wiki_not_clean(wiki_root: &Path) {
+    match validate_wiki(wiki_root) {
+        Ok(report) => {
+            if !report.is_clean() {
+                eprintln!(
+                    "agwiki export-skill: wiki validation reported {} problem(s); run `agwiki validate` for strict checks.",
+                    report.problems.len()
+                );
+                eprintln!("{}", report.to_text());
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "agwiki export-skill: wiki validation failed to run: {:#}",
+                e
+            );
+        }
+    }
+}
+
+/// Mirror each top-level `wiki/<dir>/` into `skill/references/<dir>/`, then update `SKILL.md` inside agwiki markers.
 pub fn run_export(opts: ExportOptions<'_>) -> Result<()> {
     let wiki_root = opts.wiki_root.canonicalize()?;
-    let skill_dir_base = opts
-        .skill_dir
+    let skill_root_base = opts
+        .skill_root
         .map(Path::to_path_buf)
         .unwrap_or_else(|| wiki_root.join("skill"));
-    let skill_dir = skill_dir_base.canonicalize().unwrap_or(skill_dir_base);
-    let template = opts
-        .template
+    let skill_root = skill_root_base.canonicalize().unwrap_or(skill_root_base);
+    let skill_md = opts
+        .skill_md
         .map(Path::to_path_buf)
-        .unwrap_or_else(|| skill_dir.join("SKILL.md.template"));
-    let output_md = opts
-        .output
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| skill_dir.join("SKILL.md"));
-    let index_path = opts
-        .index
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| wiki_root.join("wiki").join("index.md"));
+        .unwrap_or_else(|| skill_root.join("SKILL.md"));
+    let index_path = wiki_root.join("wiki").join("index.md");
 
-    let sections: Vec<String> = opts
-        .sections
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
+    let sections = wiki_mirror_sections(&wiki_root)?;
 
-    if !template.is_file() {
-        bail!("template not found: {}", template.display());
-    }
     if !index_path.is_file() {
         bail!("index not found: {}", index_path.display());
     }
 
     if opts.dry_run {
         println!("wiki_root={}", wiki_root.display());
-        println!("skill_dir={}", skill_dir.display());
+        println!("skill_root={}", skill_root.display());
+        println!("skill_md={}", skill_md.display());
     }
 
     for sec in &sections {
-        copy_section(&wiki_root, &skill_dir, sec, opts.dry_run)?;
+        copy_section(&wiki_root, &skill_root, sec, opts.dry_run)?;
         if opts.prune {
-            prune_section(&wiki_root, &skill_dir, sec, opts.dry_run)?;
+            prune_section(&wiki_root, &skill_root, sec, opts.dry_run)?;
         }
     }
 
@@ -443,11 +391,11 @@ pub fn run_export(opts: ExportOptions<'_>) -> Result<()> {
     let (groups, included) = parse_index_for_groups(&wiki_root, &index_text, &sections);
 
     if !opts.dry_run {
-        fs::create_dir_all(&skill_dir)?;
-        fs::create_dir_all(skill_dir.join("references"))?;
+        fs::create_dir_all(&skill_root)?;
+        fs::create_dir_all(skill_root.join("references"))?;
     }
 
-    let all_on_disk = list_mirrored_files(&skill_dir, &sections);
+    let all_on_disk = list_mirrored_files(&skill_root, &sections);
     let mut orphan_refs: Vec<String> = all_on_disk
         .into_iter()
         .filter(|r| !included.contains(r))
@@ -455,29 +403,20 @@ pub fn run_export(opts: ExportOptions<'_>) -> Result<()> {
     orphan_refs.sort();
 
     let gen = render_generated_block(&groups, &orphan_refs);
-    let template_body = fs::read_to_string(&template)?;
-    let body = format!("{}\n\n{}", template_body.trim_end(), gen);
 
     if opts.dry_run {
-        println!("--- generated SKILL.md tail ---");
+        warn_if_wiki_not_clean(&wiki_root);
+        println!("--- generated index (inside markers) ---");
         print!("{}", gen);
         let _ = std::io::stdout().flush();
         return Ok(());
     }
 
-    fs::write(&output_md, body)?;
+    let existing = fs::read_to_string(&skill_md).unwrap_or_default();
+    let merged = merge_skill_generated_index(&existing, &gen)?;
+    fs::write(&skill_md, merged)?;
 
-    if opts.rewrite_wikilinks {
-        let (stem_map, full_map) = build_slug_maps(&skill_dir, &sections);
-        let ref_root = skill_dir.join("references");
-        if ref_root.is_dir() {
-            let mut paths: Vec<_> = walk_md(&ref_root);
-            paths.sort();
-            for md in paths {
-                rewrite_wikilinks_in_file(&md, &stem_map, &full_map, false)?;
-            }
-        }
-    }
+    warn_if_wiki_not_clean(&wiki_root);
 
     Ok(())
 }
