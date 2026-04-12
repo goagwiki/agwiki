@@ -1,0 +1,617 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., 1.2.3)'
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+permissions:
+  contents: write
+
+jobs:
+  verify-version:
+    name: Verify Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.extract-version.outputs.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Extract version from tag or input
+        id: extract-version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+            TAG_VERSION="v$VERSION"
+          else
+            TAG_VERSION="${{ github.ref_name }}"
+            VERSION="${TAG_VERSION#v}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Tag version: $TAG_VERSION"
+          echo "Extracted version: $VERSION"
+
+      - name: Read version from Cargo.toml
+        id: cargo-version
+        run: |
+          CARGO_VERSION=$(grep '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "cargo-version=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Cargo.toml version: $CARGO_VERSION"
+
+      - name: Verify versions match
+        run: |
+          TAG_VER="${{ steps.extract-version.outputs.version }}"
+          CARGO_VER="${{ steps.cargo-version.outputs.cargo-version }}"
+
+          if [[ "$TAG_VER" == *"-"* ]]; then
+            echo "⚠️  Skipping version verification for pre-release tag: $TAG_VER"
+            echo "Cargo.toml version: $CARGO_VER"
+          elif [ "$TAG_VER" != "$CARGO_VER" ]; then
+            echo "❌ Version mismatch!"
+            echo "Tag version: $TAG_VER"
+            echo "Cargo.toml version: $CARGO_VER"
+            exit 1
+          else
+            echo "✅ Versions match: $TAG_VER"
+          fi
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: verify-version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary-name: agwiki
+            archive-format: tar.gz
+            archive-name: agwiki-x86_64-unknown-linux-gnu.tar.gz
+            use-cross: false
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            binary-name: agwiki
+            archive-format: tar.gz
+            archive-name: agwiki-x86_64-unknown-linux-musl.tar.gz
+            use-cross: true
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary-name: agwiki.exe
+            archive-format: zip
+            archive-name: agwiki-x86_64-pc-windows-msvc.zip
+            use-cross: false
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary-name: agwiki
+            archive-format: tar.gz
+            archive-name: agwiki-aarch64-apple-darwin.tar.gz
+            use-cross: false
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            binary-name: agwiki
+            archive-format: tar.gz
+            archive-name: agwiki-x86_64-apple-darwin.tar.gz
+            use-cross: false
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: rustfmt, clippy
+          target: ${{ matrix.target }}
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # crates.io + pin avoids Cargo panicking on `cargo install --git` (LocalPool EnterError).
+      - name: Install cross-rs
+        if: matrix.use-cross
+        run: cargo install cross --version 0.2.5 --locked
+
+      - name: Build release binary (cross)
+        if: matrix.use-cross
+        run: cross build --release --verbose --target ${{ matrix.target }} --no-default-features --features "filesystem-storage,hot-reload"
+        env:
+          RUSTFLAGS: ""
+
+      - name: Build release binary (cargo)
+        if: ${{ !matrix.use-cross }}
+        run: cargo build --release --verbose --target ${{ matrix.target }}
+        env:
+          RUSTFLAGS: ""
+
+      - name: Create release directory
+        shell: bash
+        run: |
+          mkdir -p release
+          cp target/${{ matrix.target }}/release/${{ matrix.binary-name }} release/
+
+      - name: Create README for release
+        shell: bash
+        run: |
+          cat > release/README.md << 'README_EOF'
+          # AGWiki ${{ needs.verify-version.outputs.version }}
+
+          ## Installation
+
+          ### macOS
+
+          | Binary | Hardware |
+          |--------|----------|
+          | `agwiki-aarch64-apple-darwin.tar.gz` | Apple Silicon (M1/M2/M3+) |
+          | `agwiki-x86_64-apple-darwin.tar.gz` | Intel Macs |
+
+          Example:
+          ```bash
+          tar -xzf agwiki-aarch64-apple-darwin.tar.gz
+          sudo mv agwiki /usr/local/bin/
+          agwiki --version
+          ```
+
+          ### Linux
+
+          Two Linux binaries are available:
+
+          | Binary | Best For |
+          |--------|----------|
+          | `agwiki-x86_64-unknown-linux-musl.tar.gz` | Universal - containers, CI/CD, older distributions |
+          | `agwiki-x86_64-unknown-linux-gnu.tar.gz` | FIPS/compliance environments requiring dynamic linking |
+
+          **Recommended (musl/static - works everywhere):**
+          ```bash
+          tar -xzf agwiki-x86_64-unknown-linux-musl.tar.gz
+          sudo mv agwiki /usr/local/bin/
+          agwiki --version
+          ```
+
+          **For FIPS/compliance (glibc - requires glibc 2.38+):**
+          ```bash
+          tar -xzf agwiki-x86_64-unknown-linux-gnu.tar.gz
+          sudo mv agwiki /usr/local/bin/
+          agwiki --version
+          ```
+
+          ### Windows
+          Extract the ZIP file and add to your PATH, or run from the extracted directory:
+          ```powershell
+          # Extract agwiki-x86_64-pc-windows-msvc.zip
+          # Add to PATH or run from extracted directory
+          agwiki.exe --version
+          ```
+
+          For more information, visit: https://github.com/goagwiki/agwiki
+          README_EOF
+
+      - name: Create archive
+        shell: bash
+        run: |
+          cd release
+          if [ "${{ matrix.archive-format }}" = "tar.gz" ]; then
+            tar -czf "../${{ matrix.archive-name }}" *
+          else
+            if [ "${{ runner.os }}" = "Windows" ]; then
+              powershell -Command "Compress-Archive -Path * -DestinationPath ../${{ matrix.archive-name }} -Force"
+            else
+              zip -r "../${{ matrix.archive-name }}" *
+            fi
+          fi
+          cd ..
+          ls -lh "${{ matrix.archive-name }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive-name }}
+          path: ${{ matrix.archive-name }}
+          retention-days: 30
+
+  collect-artifacts:
+    name: Collect Release Artifacts
+    needs: [verify-version, build]
+    runs-on: ubuntu-latest
+    if: always() && needs.verify-version.result == 'success'
+
+    steps:
+      - name: Download Linux GNU artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: agwiki-x86_64-unknown-linux-gnu.tar.gz
+          path: ./artifacts
+        continue-on-error: true
+
+      - name: Download Linux MUSL artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: agwiki-x86_64-unknown-linux-musl.tar.gz
+          path: ./artifacts
+        continue-on-error: true
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: agwiki-x86_64-pc-windows-msvc.zip
+          path: ./artifacts
+        continue-on-error: true
+
+      - name: Download macOS ARM64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: agwiki-aarch64-apple-darwin.tar.gz
+          path: ./artifacts
+        continue-on-error: true
+
+      - name: Download macOS x86_64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: agwiki-x86_64-apple-darwin.tar.gz
+          path: ./artifacts
+        continue-on-error: true
+
+      - name: Verify required artifacts
+        run: |
+          set -euo pipefail
+          REQUIRED=(
+            "agwiki-x86_64-unknown-linux-gnu.tar.gz"
+            "agwiki-x86_64-unknown-linux-musl.tar.gz"
+            "agwiki-x86_64-pc-windows-msvc.zip"
+            "agwiki-aarch64-apple-darwin.tar.gz"
+            "agwiki-x86_64-apple-darwin.tar.gz"
+          )
+
+          missing=0
+          echo "Collected artifacts:"
+          ls -lh ./artifacts || true
+
+          for artifact in "${REQUIRED[@]}"; do
+            if [ -f "./artifacts/$artifact" ]; then
+              echo "✅ Found $artifact"
+            else
+              echo "❌ Missing required artifact: $artifact"
+              missing=1
+            fi
+          done
+
+          if [ "$missing" -ne 0 ]; then
+            echo "Release blocked because required artifacts are missing"
+            exit 1
+          fi
+
+      - name: Generate checksums
+        run: |
+          set -euo pipefail
+          (
+            cd artifacts
+            sha256sum \
+              agwiki-x86_64-unknown-linux-gnu.tar.gz \
+              agwiki-x86_64-unknown-linux-musl.tar.gz \
+              agwiki-x86_64-pc-windows-msvc.zip \
+              agwiki-aarch64-apple-darwin.tar.gz \
+              agwiki-x86_64-apple-darwin.tar.gz \
+              | sort > checksums.txt
+          )
+          echo "Generated checksums:"
+          cat artifacts/checksums.txt
+
+      - name: Upload collected artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts
+          path: ./artifacts
+          retention-days: 7
+
+  create-release:
+    name: Create GitHub Release
+    needs: [verify-version, collect-artifacts]
+    runs-on: ubuntu-latest
+    if: always() && needs.verify-version.result == 'success' && needs.collect-artifacts.result == 'success'
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          owner: ${{ github.repository_owner }}
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - name: Download collected artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts
+          path: ./artifacts
+
+      - name: Verify release files and prepare upload list
+        id: prepare-files
+        run: |
+          set -euo pipefail
+          FILES=(
+            "artifacts/agwiki-x86_64-unknown-linux-gnu.tar.gz"
+            "artifacts/agwiki-x86_64-unknown-linux-musl.tar.gz"
+            "artifacts/agwiki-x86_64-pc-windows-msvc.zip"
+            "artifacts/agwiki-aarch64-apple-darwin.tar.gz"
+            "artifacts/agwiki-x86_64-apple-darwin.tar.gz"
+            "artifacts/checksums.txt"
+          )
+
+          for file in "${FILES[@]}"; do
+            if [ ! -f "$file" ]; then
+              echo "Missing release file: $file"
+              exit 1
+            fi
+          done
+
+          {
+            echo "files<<EOF"
+            printf '%s\n' "${FILES[@]}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Delete existing release if present
+        continue-on-error: true
+        run: |
+          TAG="${{ github.ref_name }}"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists, deleting it"
+            gh release delete "$TAG" --yes
+            sleep 2
+          else
+            echo "No existing release found for $TAG"
+          fi
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Generate release notes
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.verify-version.outputs.version }}"
+          TAG="${{ github.ref_name }}"
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+
+          if [ -n "$PREV_TAG" ]; then
+            {
+              echo "## Changes since $PREV_TAG"
+              echo
+              git log --pretty=format:"- %s (%h)" "${PREV_TAG}..${TAG}" || echo "- Initial release"
+            } > release_notes.md
+          else
+            {
+              echo "## Release $VERSION"
+              echo
+              echo "- Initial release"
+            } > release_notes.md
+          fi
+
+          {
+            echo
+            echo "## Installation"
+            echo
+            echo "Download the pre-built binary for your platform:"
+            echo
+            echo "### macOS"
+            echo
+            echo "- **Apple Silicon**: \`agwiki-aarch64-apple-darwin.tar.gz\`"
+            echo "- **Intel**: \`agwiki-x86_64-apple-darwin.tar.gz\`"
+            echo
+            echo "### Linux"
+            echo
+            echo "- **Linux (glibc)**: \`agwiki-x86_64-unknown-linux-gnu.tar.gz\`"
+            echo "- **Linux (musl/static)**: \`agwiki-x86_64-unknown-linux-musl.tar.gz\`"
+            echo
+            echo "### Windows"
+            echo
+            echo "- **Windows**: \`agwiki-x86_64-pc-windows-msvc.zip\`"
+            echo
+            echo "### Checksums"
+            echo
+            echo "- **SHA256 checksums**: \`checksums.txt\`"
+          } >> release_notes.md
+
+          cat release_notes.md
+
+      - name: Create release (draft)
+        uses: softprops/action-gh-release@v1
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          tag_name: v${{ needs.verify-version.outputs.version }}
+          name: Release ${{ needs.verify-version.outputs.version }}
+          body_path: release_notes.md
+          files: ${{ steps.prepare-files.outputs.files }}
+          draft: true
+          prerelease: false
+          fail_on_unmatched_files: true
+          generate_release_notes: false
+
+      - name: Publish release
+        run: |
+          TAG="v${{ needs.verify-version.outputs.version }}"
+          gh release edit "$TAG" --draft=false
+          echo "Release $TAG is published"
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+
+  update-package-managers:
+    name: Update Package Managers
+    needs: [verify-version, create-release]
+    runs-on: ubuntu-latest
+    if: always() && needs.create-release.result == 'success'
+    permissions:
+      contents: write
+      actions: read
+
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          owner: ${{ github.repository_owner }}
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          repositories: homebrew-cli,scoop-bucket
+
+      - name: Set GH token for GitHub CLI
+        run: |
+          echo "GH_TOKEN=${{ steps.app-token.outputs.token }}" >> "$GITHUB_ENV"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Checkout homebrew-cli repo
+        uses: actions/checkout@v4
+        with:
+          repository: goagwiki/homebrew-cli
+          path: homebrew-cli
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Update Homebrew formula
+        run: |
+          cd homebrew-cli
+          chmod +x generate_formula.sh
+          ./generate_formula.sh --version ${{ needs.verify-version.outputs.version }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Prepare Homebrew update branch
+        id: hb-branch
+        run: |
+          VERSION="${{ needs.verify-version.outputs.version }}"
+          BRANCH="ci/release-v${VERSION}-${{ github.run_id }}"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push Homebrew branch
+        id: hb-commit
+        run: |
+          set -euo pipefail
+          BRANCH="${{ steps.hb-branch.outputs.branch }}"
+          VERSION="${{ needs.verify-version.outputs.version }}"
+          cd homebrew-cli
+
+          git checkout -B "$BRANCH"
+
+          if git diff --quiet && git diff --staged --quiet; then
+            echo "No changes to commit for Homebrew formula"
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/agwiki.rb
+          git commit -m "chore: update agwiki to v${VERSION}"
+          git push "https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/goagwiki/homebrew-cli.git" "$BRANCH"
+          echo "has_changes=true" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Validate Homebrew branch in tap CI
+        if: steps.hb-commit.outputs.has_changes == 'true'
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.verify-version.outputs.version }}"
+          BRANCH="${{ steps.hb-branch.outputs.branch }}"
+          gh workflow run validate-formula.yml \
+            --repo goagwiki/homebrew-cli \
+            --ref "$BRANCH" \
+            -f version="$VERSION"
+
+          RUN_ID=""
+          for _ in {1..60}; do
+            RUN_ID=$(gh run list \
+              --repo goagwiki/homebrew-cli \
+              --workflow validate-formula.yml \
+              --event workflow_dispatch \
+              --json databaseId,status,headBranch,displayTitle \
+              -q ".[] | select(.headBranch == \"$BRANCH\") | .databaseId" \
+              | head -n 1)
+            if [ -n "$RUN_ID" ]; then
+              break
+            fi
+            sleep 10
+          done
+
+          if [ -z "$RUN_ID" ]; then
+            echo "Could not locate validate-formula workflow run"
+            exit 1
+          fi
+
+          gh run watch "$RUN_ID" --repo goagwiki/homebrew-cli --exit-status
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Merge validated Homebrew branch to main
+        if: steps.hb-commit.outputs.has_changes == 'true'
+        run: |
+          set -euo pipefail
+          BRANCH="${{ steps.hb-branch.outputs.branch }}"
+          cd homebrew-cli
+          git fetch origin main "$BRANCH"
+          git checkout main
+          git merge --ff-only "origin/$BRANCH"
+          git push "https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/goagwiki/homebrew-cli.git" main
+          git push "https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/goagwiki/homebrew-cli.git" --delete "$BRANCH"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Checkout scoop-bucket repo
+        uses: actions/checkout@v4
+        with:
+          repository: goagwiki/scoop-bucket
+          path: scoop-bucket
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Update Scoop manifest
+        run: |
+          cd scoop-bucket
+          chmod +x generate_manifest.sh
+          ./generate_manifest.sh --version ${{ needs.verify-version.outputs.version }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Commit and push Scoop changes
+        run: |
+          cd scoop-bucket
+          VERSION="${{ needs.verify-version.outputs.version }}"
+
+          if git diff --quiet && git diff --staged --quiet; then
+            echo "No changes to commit for Scoop manifest"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add .
+            git commit -m "chore: update agwiki to v${VERSION}"
+            git push "https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/goagwiki/scoop-bucket.git" main
+          fi

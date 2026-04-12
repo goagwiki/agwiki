@@ -1,0 +1,187 @@
+name: Auto Release
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'docs/**'
+      - 'specs/**'
+      - 'examples/**'
+      - 'skills/**'
+      - 'webdocs/**'
+      - 'helm/**'
+      - 'reports/**'
+      - '*.md'
+      - '.github/*.md'
+      - '.gitignore'
+      - 'LICENSE'
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  auto-release:
+    name: Auto Release
+    runs-on: ubuntu-latest
+
+    if: |
+      !contains(github.event.head_commit.message, '[skip release]') &&
+      !contains(github.event.head_commit.message, '[no release]') &&
+      !contains(github.event.head_commit.message, '[skip ci]')
+
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Check for no-release label
+        id: check-label
+        run: |
+          PR_NUMBER=$(echo "${{ github.event.head_commit.message }}" | grep -oP '#\K[0-9]+' | head -1 || echo "")
+
+          if [ -n "$PR_NUMBER" ]; then
+            echo "Found PR #$PR_NUMBER in commit message"
+            LABELS=$(gh pr view "$PR_NUMBER" --json labels -q '.labels[].name' 2>/dev/null || echo "")
+
+            if echo "$LABELS" | grep -qE '^no-release$'; then
+              echo "Found 'no-release' label on PR #$PR_NUMBER"
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Get current and last released versions
+        if: steps.check-label.outputs.skip != 'true'
+        id: versions
+        run: |
+          CURRENT=$(grep '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          LAST_VERSION="${LAST_TAG#v}"
+          echo "last=$LAST_VERSION" >> "$GITHUB_OUTPUT"
+
+          echo "Current Cargo.toml version: $CURRENT"
+          echo "Last released tag: $LAST_TAG ($LAST_VERSION)"
+
+      - name: Determine release version
+        if: steps.check-label.outputs.skip != 'true'
+        id: release
+        run: |
+          CURRENT="${{ steps.versions.outputs.current }}"
+          LAST="${{ steps.versions.outputs.last }}"
+
+          if [ "$CURRENT" != "$LAST" ]; then
+            echo "version=$CURRENT" >> "$GITHUB_OUTPUT"
+            echo "needs_bump=false" >> "$GITHUB_OUTPUT"
+            echo "Developer set version: $CURRENT (was $LAST)"
+          else
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+            NEW_VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
+            echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+            echo "needs_bump=true" >> "$GITHUB_OUTPUT"
+            echo "Auto-bumping patch: $CURRENT -> $NEW_VERSION"
+          fi
+
+      - name: Update Cargo.toml and Cargo.lock version
+        if: steps.check-label.outputs.skip != 'true' && steps.release.outputs.needs_bump == 'true'
+        run: |
+          VERSION="${{ steps.release.outputs.version }}"
+          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
+
+          echo "Updated Cargo.toml to version $VERSION:"
+          grep '^version = ' Cargo.toml
+
+          cargo update -p agwiki --precise "$VERSION"
+          echo "Updated Cargo.lock to version $VERSION"
+
+      - name: Commit version bump
+        if: steps.check-label.outputs.skip != 'true' && steps.release.outputs.needs_bump == 'true'
+        run: |
+          VERSION="${{ steps.release.outputs.version }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore: bump version to $VERSION [skip ci]"
+          git push origin refs/heads/main:refs/heads/main
+
+      - name: Create and push tag
+        if: steps.check-label.outputs.skip != 'true'
+        run: |
+          VERSION="${{ steps.release.outputs.version }}"
+          TAG="v$VERSION"
+
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists, skipping"
+            exit 0
+          fi
+
+          git tag "$TAG"
+          git push origin "$TAG"
+
+          echo "::notice::Created and pushed tag $TAG"
+
+      - name: Trigger release workflow
+        if: steps.check-label.outputs.skip != 'true'
+        run: |
+          VERSION="${{ steps.release.outputs.version }}"
+          TAG="v$VERSION"
+
+          echo "Triggering release workflow for version $VERSION..."
+          sleep 2
+          gh workflow run release.yml --ref "$TAG" -f version="$VERSION"
+          echo "::notice::Release workflow triggered for $TAG"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Wait for release workflow result
+        if: steps.check-label.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.release.outputs.version }}"
+          TAG="v$VERSION"
+
+          RUN_ID=""
+          for _ in {1..36}; do
+            RUN_ID=$(gh run list \
+              --workflow release.yml \
+              --event workflow_dispatch \
+              --json databaseId,displayTitle,headBranch,status \
+              -q ".[] | select(.headBranch == \"$TAG\") | .databaseId" \
+              | head -n 1)
+            if [ -n "$RUN_ID" ]; then
+              break
+            fi
+            sleep 10
+          done
+
+          if [ -z "$RUN_ID" ]; then
+            echo "Failed to find release workflow run for $TAG"
+            exit 1
+          fi
+
+          gh run watch "$RUN_ID" --exit-status
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Skip notice
+        if: steps.check-label.outputs.skip == 'true'
+        run: |
+          echo "::notice::Release skipped due to 'no-release' label on PR"
