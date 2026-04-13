@@ -491,7 +491,8 @@ jobs:
           owner: ${{ github.repository_owner }}
           app-id: ${{ secrets.GH_APP_ID }}
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
-          repositories: homebrew-cli,scoop-bucket
+          # agwiki: generate_formula.sh runs `gh release view` on the source repo for asset URLs/digests
+          repositories: agwiki,homebrew-cli,scoop-bucket
 
       - name: Set GH token for GitHub CLI
         run: |
