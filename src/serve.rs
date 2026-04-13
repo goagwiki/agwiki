@@ -12,6 +12,7 @@ use axum::http::{header, HeaderValue, Request, StatusCode, Uri, Version};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{middleware, Json, Router};
+use mime_guess::MimeGuess;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -253,13 +254,17 @@ pub mod handlers {
     ) -> Response {
         let rel = if path.trim().is_empty() {
             PathBuf::from("index.md")
-        } else if path.ends_with(".md") {
-            PathBuf::from(path.trim_start_matches('/'))
         } else {
-            PathBuf::from(format!("{}.md", path.trim_start_matches('/')))
+            let trimmed = path.trim_start_matches('/');
+            let p = PathBuf::from(trimmed);
+            match p.extension().and_then(|s| s.to_str()) {
+                Some("md") => p,
+                Some(_) => p,
+                None => PathBuf::from(format!("{trimmed}.md")),
+            }
         };
 
-        let md_path = match resolve_under_root(&state.wiki_dir, &rel) {
+        let file_path = match resolve_under_root(&state.wiki_dir, &rel) {
             Some(p) => p,
             None => {
                 eprintln!("404 /wiki/{path} (path traversal blocked)");
@@ -267,15 +272,19 @@ pub mod handlers {
             }
         };
 
-        if !md_path.is_file() {
-            eprintln!("404 /wiki/{path} (missing: {})", md_path.display());
+        if !file_path.is_file() {
+            eprintln!("404 /wiki/{path} (missing: {})", file_path.display());
             return (StatusCode::NOT_FOUND, "Not Found").into_response();
         }
 
-        match state.render_markdown_file(&md_path) {
+        if rel.extension().and_then(|s| s.to_str()) != Some("md") {
+            return serve_static_file(&file_path, &path);
+        }
+
+        match state.render_markdown_file(&file_path) {
             Ok((title, content_html)) => {
                 let url = state
-                    .url_for_md_path(&md_path)
+                    .url_for_md_path(&file_path)
                     .unwrap_or_else(|| "/".to_string());
                 let body = state
                     .templates
@@ -294,6 +303,25 @@ pub mod handlers {
                 (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response()
             }
         }
+    }
+
+    fn serve_static_file(file_path: &Path, req_path: &str) -> Response {
+        let bytes = match std::fs::read(file_path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("500 /wiki/{req_path} (SERVE_FILE_READ_ERROR: {e})");
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error")
+                    .into_response();
+            }
+        };
+        let mime = MimeGuess::from_path(file_path).first_or_octet_stream();
+        let mut resp = bytes.into_response();
+        resp.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_str(mime.as_ref())
+                .unwrap_or(HeaderValue::from_static("application/octet-stream")),
+        );
+        resp
     }
 
     pub async fn search(

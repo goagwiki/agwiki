@@ -106,3 +106,79 @@ async fn serve_assets_are_embedded() {
         .unwrap();
     assert!(ct.contains("text/css"));
 }
+
+#[tokio::test]
+async fn serve_wiki_static_files_and_images_work() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    fs::create_dir_all(root.join("wiki/assets")).unwrap();
+
+    // Minimal PNG signature (not necessarily a valid image, but good enough for MIME guessing by extension).
+    fs::write(root.join("wiki/assets/pixel.png"), b"\x89PNG\r\n\x1a\n").unwrap();
+    fs::write(root.join("wiki/assets/doc.pdf"), b"%PDF-1.4\n").unwrap();
+    fs::write(
+        root.join("wiki/index.md"),
+        "# Index\n\n![Pixel](assets/pixel.png)\n\n[Doc](assets/doc.pdf)\n",
+    )
+    .unwrap();
+
+    let server = WikiServer::new(ServerConfig {
+        port: 0,
+        host: "127.0.0.1".to_string(),
+        open_browser: false,
+        wiki_root: root.to_path_buf(),
+    })
+    .unwrap();
+
+    let app = std::sync::Arc::new(server).router();
+
+    // Rendered HTML should point at the rewritten wiki URLs for non-markdown assets.
+    let resp = app
+        .clone()
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let html = String::from_utf8_lossy(&body);
+    assert!(html.contains("src=\"/wiki/assets/pixel.png\""));
+    assert!(html.contains("href=\"/wiki/assets/doc.pdf\""));
+
+    // Static files under wiki/ should be served as raw bytes with a useful content-type.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/wiki/assets/pixel.png")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(ct.starts_with("image/png"));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/wiki/assets/doc.pdf")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(ct.starts_with("application/pdf"));
+}
