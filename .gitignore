@@ -2,3 +2,6 @@
 **/*.rs.bk
 repomix-output.xml
 .newton
+
+# Newton planner scratch (planner.sh ./tmp)
+/tmp/
