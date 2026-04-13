@@ -7,6 +7,7 @@ use anyhow::{bail, Context, Result};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use crate::toolkit::expand_ingest_prompt;
 use aikit_sdk::{is_runnable, run_agent_events, runnable_agents, RunOptions};
 
 /// Canonicalize `file`, ensure it exists and contains valid text content.
@@ -85,11 +86,240 @@ pub fn run_aikit(
     Ok(())
 }
 
+/// Discover all Markdown files (`*.md` / `*.MD`, case-insensitive) under `dir` recursively.
+///
+/// Does **not** follow symlinks. Returns paths sorted lexicographically by full path.
+/// `dir` must exist and be a directory.
+pub fn discover_md_files(dir: &Path) -> Result<Vec<PathBuf>> {
+    let canon_dir = dir
+        .canonicalize()
+        .with_context(|| format!("cannot access directory: {}", dir.display()))?;
+
+    if !canon_dir.is_dir() {
+        bail!("not a directory: {}", dir.display());
+    }
+
+    let mut results = Vec::new();
+    let mut stack = vec![canon_dir];
+
+    while let Some(current) = stack.pop() {
+        let entries = std::fs::read_dir(&current)
+            .with_context(|| format!("cannot read directory: {}", current.display()))?;
+
+        for entry in entries {
+            let entry =
+                entry.with_context(|| format!("error reading entry in {}", current.display()))?;
+            let file_type = entry
+                .file_type()
+                .with_context(|| format!("cannot get file type for {}", entry.path().display()))?;
+
+            // Skip symlinks
+            if file_type.is_symlink() {
+                continue;
+            }
+
+            let path = entry.path();
+
+            if file_type.is_dir() {
+                stack.push(path);
+            } else if file_type.is_file()
+                && path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.eq_ignore_ascii_case("md"))
+                    .unwrap_or(false)
+            {
+                results.push(path);
+            }
+        }
+    }
+
+    results.sort();
+    Ok(results)
+}
+
+/// Run the full ingest pipeline for a single file path.
+fn run_ingest_for_path(
+    wiki_root: &Path,
+    file: &Path,
+    prompt_path: &Path,
+    agent: &str,
+    model: Option<&str>,
+    stream: bool,
+) -> Result<()> {
+    let ingest_path = resolve_ingest_source(file)?;
+    let prompt = expand_ingest_prompt(wiki_root, &ingest_path, prompt_path)?;
+    run_aikit(wiki_root, &prompt, agent, model, stream)
+}
+
+/// Summary returned by [`run_folder_ingest`].
+#[derive(Debug)]
+pub struct FolderIngestResult {
+    /// Total files discovered.
+    pub total: usize,
+    /// Files that completed without error.
+    pub succeeded: usize,
+    /// Files that failed, paired with their error message.
+    pub failures: Vec<(PathBuf, String)>,
+}
+
+/// Ingest all `*.md` files discovered under `folder` (recursive, no symlinks).
+///
+/// Returns an error immediately (before ingesting any file) if the discovered
+/// file count exceeds `max_files` and `max_files > 0`.
+/// Pass `max_files = 0` for no cap (unlimited).
+pub fn run_folder_ingest(
+    wiki_root: &Path,
+    folder: &Path,
+    prompt_path: &Path,
+    agent: &str,
+    model: Option<&str>,
+    stream: bool,
+    max_files: usize,
+) -> Result<FolderIngestResult> {
+    let files = discover_md_files(folder)?;
+    let total = files.len();
+
+    if max_files > 0 && total > max_files {
+        bail!(
+            "found {} markdown file(s) under {}; exceeds --max-files cap of {}. \
+             Pass --max-files {} (or higher) to proceed.",
+            total,
+            folder.display(),
+            max_files,
+            total
+        );
+    }
+
+    let mut failures: Vec<(PathBuf, String)> = Vec::new();
+
+    for file in &files {
+        if let Err(e) = run_ingest_for_path(wiki_root, file, prompt_path, agent, model, stream) {
+            failures.push((file.clone(), e.to_string()));
+        }
+    }
+
+    let succeeded = total - failures.len();
+    Ok(FolderIngestResult {
+        total,
+        succeeded,
+        failures,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    // --- discover_md_files tests ---
+
+    #[test]
+    fn discover_md_files_empty_dir() {
+        let tmp = tempdir().unwrap();
+        let files = discover_md_files(tmp.path()).unwrap();
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn discover_md_files_finds_md_only() {
+        let tmp = tempdir().unwrap();
+        fs::write(tmp.path().join("doc.md"), "# doc").unwrap();
+        fs::write(tmp.path().join("file.txt"), "text").unwrap();
+        fs::write(tmp.path().join("data.json"), "{}").unwrap();
+        fs::write(tmp.path().join("noext"), "noext").unwrap();
+        let files = discover_md_files(tmp.path()).unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].ends_with("doc.md"));
+    }
+
+    #[test]
+    fn discover_md_files_case_insensitive() {
+        let tmp = tempdir().unwrap();
+        fs::write(tmp.path().join("upper.MD"), "# Up").unwrap();
+        let files = discover_md_files(tmp.path()).unwrap();
+        assert_eq!(files.len(), 1);
+    }
+
+    #[test]
+    fn discover_md_files_nested_dirs() {
+        let tmp = tempdir().unwrap();
+        let sub = tmp.path().join("sub");
+        fs::create_dir(&sub).unwrap();
+        fs::write(tmp.path().join("root.md"), "root").unwrap();
+        fs::write(sub.join("nested.md"), "nested").unwrap();
+        let files = discover_md_files(tmp.path()).unwrap();
+        assert_eq!(files.len(), 2);
+    }
+
+    #[test]
+    fn discover_md_files_sorted_lexicographic() {
+        let tmp = tempdir().unwrap();
+        fs::write(tmp.path().join("z.md"), "z").unwrap();
+        fs::write(tmp.path().join("a.md"), "a").unwrap();
+        fs::write(tmp.path().join("m.md"), "m").unwrap();
+        let files = discover_md_files(tmp.path()).unwrap();
+        assert_eq!(files.len(), 3);
+        let names: Vec<_> = files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["a.md", "m.md", "z.md"]);
+    }
+
+    #[test]
+    fn discover_md_files_rejects_nonexistent() {
+        let tmp = tempdir().unwrap();
+        let missing = tmp.path().join("missing");
+        assert!(discover_md_files(&missing).is_err());
+    }
+
+    #[test]
+    fn run_folder_ingest_cap_exceeded_returns_error() {
+        let tmp = tempdir().unwrap();
+        let batch = tmp.path().join("batch");
+        fs::create_dir(&batch).unwrap();
+        for i in 0..5u32 {
+            fs::write(batch.join(format!("f{i}.md")), "# note").unwrap();
+        }
+        // cap of 3 with 5 files → error
+        let prompt_path = tmp.path().join("ingest.md");
+        fs::write(&prompt_path, "Ingest {{INGEST_PATH}} into {{WIKI_ROOT}}\n").unwrap();
+        let err = run_folder_ingest(tmp.path(), &batch, &prompt_path, "codex", None, false, 3)
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("5"), "expected file count in error: {msg}");
+        assert!(msg.contains("--max-files"), "expected hint in error: {msg}");
+    }
+
+    #[test]
+    fn run_folder_ingest_zero_cap_means_unlimited() {
+        let tmp = tempdir().unwrap();
+        let batch = tmp.path().join("batch");
+        fs::create_dir(&batch).unwrap();
+        // 5 files, cap = 0 → no cap applied; will fail at agent step (not runnable) not at cap
+        for i in 0..5u32 {
+            fs::write(batch.join(format!("f{i}.md")), "# note").unwrap();
+        }
+        let prompt_path = tmp.path().join("ingest.md");
+        fs::write(&prompt_path, "Ingest {{INGEST_PATH}} into {{WIKI_ROOT}}\n").unwrap();
+        let result = run_folder_ingest(
+            tmp.path(),
+            &batch,
+            &prompt_path,
+            "nonexistent-agent-xyz",
+            None,
+            false,
+            0,
+        )
+        .unwrap();
+        // all 5 files should have failed at the agent step, not at cap
+        assert_eq!(result.total, 5);
+        assert_eq!(result.failures.len(), 5);
+    }
+
+    // --- resolve_ingest_source tests ---
 
     #[test]
     fn resolve_ingest_source_accepts_md() {
