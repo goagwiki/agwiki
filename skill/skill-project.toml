@@ -1,0 +1,6 @@
+[metadata]
+version = "1.0.0"
+name = "tools-agwiki"
+description = "Operates the agwiki CLI: init, ingest (aikit-sdk), validate, export-skill; Agent Skills layout and CI expectations."
+
+[dependencies]
