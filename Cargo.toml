@@ -1,6 +1,6 @@
 [package]
 name = "agwiki"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Agent-based wiki: init, ingest, validate, skill export"
 license = "Apache-2.0"
