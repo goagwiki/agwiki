@@ -5,16 +5,23 @@ use std::path::Path;
 
 use crate::upkeep::{mdlink_re, norm_md_link, norm_wikilink_target, wikilink_re};
 
+/// Embedded web UI assets and basic string-template rendering helpers.
 #[derive(Debug, Clone)]
 pub struct Templates {
+    /// HTML template for individual wiki pages.
     pub page_template: &'static str,
+    /// HTML template for the root page (currently unused; `index.md` uses `page_template`).
     pub index_template: &'static str,
+    /// HTML template for a standalone search page (currently unused; search UI is in the header).
     pub search_template: &'static str,
+    /// Stylesheet served at `/assets/style.css`.
     pub style_css: &'static str,
+    /// JavaScript served at `/assets/search.js`.
     pub search_js: &'static str,
 }
 
 impl Templates {
+    /// Load all embedded assets via `include_str!` at compile time.
     pub fn new() -> Self {
         Self {
             page_template: include_str!("assets/page.html"),
@@ -45,6 +52,9 @@ impl Default for Templates {
     }
 }
 
+/// Derive a best-effort page title from markdown content.
+///
+/// Uses the first `# ` heading when present; otherwise falls back to the file stem.
 pub fn extract_title(markdown: &str, md_path: &Path) -> String {
     for line in markdown.lines() {
         let t = line.trim();
@@ -62,6 +72,11 @@ pub fn extract_title(markdown: &str, md_path: &Path) -> String {
         .to_string()
 }
 
+/// Rewrite wikilinks and relative markdown links into server URLs.
+///
+/// - Wikilinks (`[[target]]` and `[[target|Label]]`) are resolved via `norm_wikilink_target`.
+/// - Markdown links/images (`[text](path)` / `![alt](path)`) are resolved via `norm_md_link`.
+/// - Unresolvable links are left unchanged.
 pub fn rewrite_links<F>(markdown: &str, src_md: &Path, wiki_dir: &Path, url_for: F) -> String
 where
     F: Fn(&Path) -> Option<String> + Copy,
@@ -127,6 +142,9 @@ where
     .into_owned()
 }
 
+/// Convert markdown to HTML using `pulldown-cmark`.
+///
+/// Raw HTML is stripped to reduce script injection risk when browsing untrusted content.
 pub fn markdown_to_html(markdown: &str) -> String {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);

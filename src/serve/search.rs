@@ -5,28 +5,45 @@ use std::path::{Path, PathBuf};
 
 use crate::upkeep::walk_md;
 
+/// In-memory full-text index for markdown files under `wiki/`.
+///
+/// Built once at server startup by tokenizing each line of each `*.md` file.
 #[derive(Debug, Clone)]
 pub struct SearchIndex {
+    /// Token -> occurrences across files.
     pub word_map: HashMap<String, Vec<SearchEntry>>,
+    /// Canonical markdown path -> full file contents.
     pub file_content: HashMap<PathBuf, String>,
 }
 
+/// One word occurrence in a specific file/line, used for snippets and ranking.
 #[derive(Debug, Clone)]
 pub struct SearchEntry {
+    /// Canonical path to the markdown file that contained the word.
     pub file_path: PathBuf,
+    /// 1-based line number within the file.
     pub line_number: usize,
+    /// Trimmed line text (used for snippets).
     pub context: String,
 }
 
+/// JSON-serializable search result returned by `GET /search?q=...`.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SearchResult {
+    /// Display path (e.g. `wiki/concepts/example.md`).
     pub file_path: String,
+    /// Best-effort title (first `# ` heading or file stem).
     pub title: String,
+    /// Short snippet for quick scanning.
     pub snippet: String,
+    /// Server-relative URL to open the page (e.g. `/wiki/concepts/example`).
     pub url: String,
 }
 
 impl SearchIndex {
+    /// Build a `SearchIndex` from all markdown files under `wiki_dir`.
+    ///
+    /// Returns an error if any markdown file is not valid UTF-8.
     pub fn build(wiki_dir: &Path) -> Result<Self> {
         let mut word_map: HashMap<String, Vec<SearchEntry>> = HashMap::new();
         let mut file_content: HashMap<PathBuf, String> = HashMap::new();
@@ -59,6 +76,10 @@ impl SearchIndex {
         })
     }
 
+    /// Search `query` and return ranked results.
+    ///
+    /// Tokenization is ASCII-lowercased alphanumeric runs. Results are ranked by:
+    /// 1) number of distinct query words matched, then 2) total hits, then 3) path.
     pub fn search<F>(&self, query: &str, wiki_dir: &Path, url_for: F) -> Vec<SearchResult>
     where
         F: Fn(&Path) -> Option<String> + Copy,

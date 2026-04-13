@@ -235,7 +235,7 @@ fn version_to_str(v: Version) -> &'static str {
     }
 }
 
-pub mod handlers {
+mod handlers {
     use super::*;
     use crate::upkeep::resolve_under_root;
 
