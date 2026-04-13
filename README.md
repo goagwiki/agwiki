@@ -30,7 +30,7 @@ agwiki ingest -a opencode ./raw/note.md
 
 ## What you need to use ingest
 
-- **`aikit`** on your `PATH`. Ingest runs **`aikit run --events`** so progress is emitted as **NDJSON lines on stdout** (see **`aikit run --help`**). **`-a` / `--agent` is required** (no default). Optional **`-m` / `--model`** and **`--stream`** as for `aikit run`.
+- No separate installation required. Ingest uses **aikit-sdk** (bundled as a Cargo dependency) to run agents directly in-process, emitting **NDJSON lines on stdout** via an SDK event callback. **`-a` / `--agent` is required** (no default; see aikit-sdk / agent keys). Optional **`-m` / `--model`** and **`--stream`**.
 
 agwiki does **not** handle PDF or YouTube; use other tools for those.
 
@@ -44,7 +44,7 @@ agwiki export-skill [-C DIR] [--skill-root DIR] [--skill-md FILE] [--dry-run] [-
 ```
 
 - **`init`** — Create `DIR` (default `.`) if needed; `DIR` must be empty if it already exists. Writes `agwiki.toml`, creates configured subdirectories, and writes `ingest.md`.
-- **`ingest`** — Resolve the source `.md` (must exist, from cwd), load `<wiki-root>/ingest.md`, expand placeholders, run **`aikit run --events`** with cwd set to the wiki root; stdout shows the event stream for monitoring.
+- **`ingest`** — Resolve the source `.md` (must exist, from cwd), load `<wiki-root>/ingest.md`, expand placeholders, run the agent via **aikit-sdk** with cwd set to the wiki root; stdout shows the NDJSON event stream from the SDK callback.
 - **`validate`** — Report broken wikilinks and relative markdown links under `wiki/`, and list orphan pages (no incoming wikilink; entry pages such as `wiki/index.md` are skipped). Exits with status **1** if there is any problem. **`--format text`** (default) prints human-readable sections; **`--format json`** prints a single JSON object (see below).
 - **`export-skill`** — For each **immediate subdirectory** of `wiki/`, mirror `wiki/<name>/**/*.md` into `skill/references/<name>/`. Reads **`wiki/index.md`** to build a markdown index of links into those files. Updates **`SKILL.md`** (default `skill/SKILL.md`) by **replacing** the block between `<!-- agwiki:generated-index -->` and `<!-- /agwiki:generated-index -->`, or **appending** that block (including the markers) if those lines are not present yet. There is no separate template file. After export, runs the same checks as **`validate`** and prints **warnings on stderr** if anything is wrong; the command still exits **0** (use **`agwiki validate`** in CI for a failing exit code).
 
