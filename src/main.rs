@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 use agwiki::export_skill::{run_export, ExportOptions};
-use agwiki::ingest::{resolve_ingest_source, run_aikit};
+use agwiki::ingest::{resolve_ingest_source, run_aikit, run_folder_ingest};
 use agwiki::init::run_init;
 use agwiki::serve::{run_serve_blocking, ServerConfig};
 use agwiki::toolkit::{expand_ingest_prompt, require_wiki_ingest_prompt};
@@ -116,8 +116,25 @@ struct IngestArgs {
         help = "Enable agent-native streaming via aikit-sdk where supported"
     )]
     stream: bool,
-    #[arg(help = "Text source file (resolved from cwd, must exist and contain text content)")]
-    file: PathBuf,
+    #[arg(
+        help = "Text source file (resolved from cwd, must exist and contain text content)",
+        conflicts_with = "folder"
+    )]
+    file: Option<PathBuf>,
+    #[arg(
+        long,
+        value_name = "DIR",
+        help = "Ingest all *.md files under DIR recursively (batch mode; see also --max-files)",
+        conflicts_with = "file"
+    )]
+    folder: Option<PathBuf>,
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = 30,
+        help = "Maximum number of files to ingest in --folder mode (0 = unlimited, default: 30)"
+    )]
+    max_files: usize,
 }
 
 #[derive(clap::Args)]
@@ -177,15 +194,54 @@ fn main() -> Result<()> {
         }
         Commands::Ingest(a) => {
             let root = resolve_wiki_root(a.wiki.wiki_root)?;
-            let ingest_path = resolve_ingest_source(&a.file)?;
-            let prompt_path = require_wiki_ingest_prompt(&root)?;
-            let prompt = expand_ingest_prompt(&root, &ingest_path, &prompt_path)?;
             let agent = a.agent.trim();
             if agent.is_empty() {
                 return Err(anyhow::anyhow!("--agent must not be empty"));
             }
             let model = a.model.as_deref().map(str::trim).filter(|s| !s.is_empty());
-            run_aikit(&root, &prompt, agent, model, a.stream)?;
+
+            match (a.file, a.folder) {
+                (Some(file), None) => {
+                    let ingest_path = resolve_ingest_source(&file)?;
+                    let prompt_path = require_wiki_ingest_prompt(&root)?;
+                    let prompt = expand_ingest_prompt(&root, &ingest_path, &prompt_path)?;
+                    run_aikit(&root, &prompt, agent, model, a.stream)?;
+                }
+                (None, Some(folder)) => {
+                    let prompt_path = require_wiki_ingest_prompt(&root)?;
+                    let result = run_folder_ingest(
+                        &root,
+                        &folder,
+                        &prompt_path,
+                        agent,
+                        model,
+                        a.stream,
+                        a.max_files,
+                    )?;
+                    eprintln!(
+                        "Batch ingest: {} total, {} succeeded, {} failed.",
+                        result.total,
+                        result.succeeded,
+                        result.failures.len()
+                    );
+                    for (path, err) in &result.failures {
+                        eprintln!("  FAILED: {} — {}", path.display(), err);
+                    }
+                    if !result.failures.is_empty() {
+                        std::process::exit(1);
+                    }
+                }
+                (Some(_), Some(_)) => {
+                    return Err(anyhow::anyhow!(
+                        "cannot use both a file argument and --folder; choose one"
+                    ));
+                }
+                (None, None) => {
+                    return Err(anyhow::anyhow!(
+                        "either a file argument or --folder is required"
+                    ));
+                }
+            }
         }
         Commands::Validate(a) => {
             let root = resolve_wiki_root(a.wiki.wiki_root)?;

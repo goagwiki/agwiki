@@ -128,6 +128,106 @@ fn test_ingest_rejects_binary_file() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn setup_wiki(root: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    fs::create_dir_all(root.join("wiki"))?;
+    fs::write(root.join("wiki/index.md"), "# Index\n")?;
+    fs::write(
+        root.join("ingest.md"),
+        "Ingest {{INGEST_PATH}} into {{WIKI_ROOT}}\n",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn test_ingest_folder_cap_exceeded() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp = tempdir()?;
+    let root = tmp.path();
+    setup_wiki(root)?;
+
+    let batch_dir = root.join("batch");
+    fs::create_dir(&batch_dir)?;
+    for i in 0..31u32 {
+        fs::write(batch_dir.join(format!("file{i:02}.md")), "# Note\n")?;
+    }
+
+    let mut cmd = Command::cargo_bin("agwiki")?;
+    cmd.arg("ingest")
+        .arg("--wiki-root")
+        .arg(root)
+        .arg("-a")
+        .arg("codex")
+        .arg("--folder")
+        .arg(&batch_dir);
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("31"))
+        .stderr(predicate::str::contains("--max-files"));
+    Ok(())
+}
+
+#[test]
+fn test_ingest_folder_empty_dir_succeeds() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp = tempdir()?;
+    let root = tmp.path();
+    setup_wiki(root)?;
+
+    let batch_dir = root.join("batch");
+    fs::create_dir(&batch_dir)?;
+
+    let mut cmd = Command::cargo_bin("agwiki")?;
+    cmd.arg("ingest")
+        .arg("--wiki-root")
+        .arg(root)
+        .arg("-a")
+        .arg("codex")
+        .arg("--folder")
+        .arg(&batch_dir);
+    cmd.assert().success();
+    Ok(())
+}
+
+#[test]
+fn test_ingest_folder_missing_dir_fails() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp = tempdir()?;
+    let root = tmp.path();
+    setup_wiki(root)?;
+
+    let mut cmd = Command::cargo_bin("agwiki")?;
+    cmd.arg("ingest")
+        .arg("--wiki-root")
+        .arg(root)
+        .arg("-a")
+        .arg("codex")
+        .arg("--folder")
+        .arg(root.join("nonexistent"));
+    cmd.assert().failure();
+    Ok(())
+}
+
+#[test]
+fn test_ingest_file_and_folder_conflict_fails() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp = tempdir()?;
+    let root = tmp.path();
+    setup_wiki(root)?;
+
+    let batch_dir = root.join("batch");
+    fs::create_dir(&batch_dir)?;
+    let file = root.join("note.md");
+    fs::write(&file, "# Note\n")?;
+
+    let mut cmd = Command::cargo_bin("agwiki")?;
+    cmd.arg("ingest")
+        .arg("--wiki-root")
+        .arg(root)
+        .arg("-a")
+        .arg("codex")
+        .arg("--folder")
+        .arg(&batch_dir)
+        .arg(&file);
+    cmd.assert().failure();
+    Ok(())
+}
+
 #[cfg(unix)]
 mod unix_tests {
     use super::*;
@@ -371,6 +471,138 @@ mod unix_tests {
             assert!(
                 !stderr.contains("binary"),
                 "unexpected binary error: {stderr}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_ingest_folder_with_stub_agent() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = PATH_MUTEX.lock().unwrap();
+
+        let stub_dir = tempdir()?;
+        make_stub_agent(stub_dir.path())?;
+
+        let wiki_tmp = tempdir()?;
+        let root = wiki_tmp.path();
+        fs::create_dir_all(root.join("wiki"))?;
+        fs::write(root.join("wiki/index.md"), "# Index\n")?;
+        fs::write(
+            root.join("ingest.md"),
+            "Ingest {{INGEST_PATH}} into {{WIKI_ROOT}}\n",
+        )?;
+
+        let batch_dir = root.join("batch");
+        fs::create_dir(&batch_dir)?;
+        fs::write(batch_dir.join("a.md"), "# A\n")?;
+        fs::write(batch_dir.join("b.md"), "# B\n")?;
+
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var(
+            "PATH",
+            format!("{}:{}", stub_dir.path().display(), original_path),
+        );
+
+        let output = Command::cargo_bin("agwiki")
+            .unwrap()
+            .arg("ingest")
+            .arg("--wiki-root")
+            .arg(root)
+            .arg("-a")
+            .arg("codex")
+            .arg("--folder")
+            .arg(&batch_dir)
+            .output()
+            .unwrap();
+
+        std::env::set_var("PATH", original_path);
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                !stderr.contains("not runnable"),
+                "unexpected not-runnable error: {stderr}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_ingest_folder_max_files_override() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = PATH_MUTEX.lock().unwrap();
+
+        let stub_dir = tempdir()?;
+        make_stub_agent(stub_dir.path())?;
+
+        let wiki_tmp = tempdir()?;
+        let root = wiki_tmp.path();
+        fs::create_dir_all(root.join("wiki"))?;
+        fs::write(root.join("wiki/index.md"), "# Index\n")?;
+        fs::write(
+            root.join("ingest.md"),
+            "Ingest {{INGEST_PATH}} into {{WIKI_ROOT}}\n",
+        )?;
+
+        let batch_dir = root.join("batch");
+        fs::create_dir(&batch_dir)?;
+        // 5 files; default cap is 30 so this passes; test that --max-files 3 blocks it
+        for i in 0..5u32 {
+            fs::write(batch_dir.join(format!("f{i}.md")), "# note")?;
+        }
+
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var(
+            "PATH",
+            format!("{}:{}", stub_dir.path().display(), original_path),
+        );
+
+        // With --max-files 3, 5 files should be rejected
+        let blocked = Command::cargo_bin("agwiki")
+            .unwrap()
+            .arg("ingest")
+            .arg("--wiki-root")
+            .arg(root)
+            .arg("-a")
+            .arg("codex")
+            .arg("--folder")
+            .arg(&batch_dir)
+            .arg("--max-files")
+            .arg("3")
+            .output()
+            .unwrap();
+
+        // With --max-files 10, 5 files should proceed
+        let allowed = Command::cargo_bin("agwiki")
+            .unwrap()
+            .arg("ingest")
+            .arg("--wiki-root")
+            .arg(root)
+            .arg("-a")
+            .arg("codex")
+            .arg("--folder")
+            .arg(&batch_dir)
+            .arg("--max-files")
+            .arg("10")
+            .output()
+            .unwrap();
+
+        std::env::set_var("PATH", original_path);
+
+        assert!(
+            !blocked.status.success(),
+            "expected failure with --max-files 3 for 5 files"
+        );
+        let blocked_stderr = String::from_utf8_lossy(&blocked.stderr);
+        assert!(
+            blocked_stderr.contains("--max-files"),
+            "expected --max-files hint: {blocked_stderr}"
+        );
+
+        if !allowed.status.success() {
+            let stderr = String::from_utf8_lossy(&allowed.stderr);
+            assert!(
+                !stderr.contains("--max-files"),
+                "unexpected cap error with --max-files 10: {stderr}"
             );
         }
         Ok(())
