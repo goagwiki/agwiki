@@ -6,6 +6,9 @@ use std::fs;
 use std::path::Path;
 
 const DEFAULT_INGEST_TEMPLATE: &str = include_str!("../prompts/ingest.md");
+const WIKI_INDEX_TEMPLATE: &str = include_str!("../prompts/wiki-index.md");
+const WIKI_INBOX_TEMPLATE: &str = include_str!("../prompts/wiki-inbox.md");
+const WIKI_LOG_TEMPLATE: &str = include_str!("../prompts/wiki-log.md");
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AgwikiConfig {
@@ -57,6 +60,9 @@ pub fn run_init(target: &Path) -> Result<()> {
     }
 
     fs::write(target.join("ingest.md"), DEFAULT_INGEST_TEMPLATE).context("write ingest.md")?;
+    fs::write(target.join("wiki/index.md"), WIKI_INDEX_TEMPLATE).context("write wiki/index.md")?;
+    fs::write(target.join("wiki/inbox.md"), WIKI_INBOX_TEMPLATE).context("write wiki/inbox.md")?;
+    fs::write(target.join("wiki/log.md"), WIKI_LOG_TEMPLATE).context("write wiki/log.md")?;
 
     Ok(())
 }
@@ -76,6 +82,12 @@ mod tests {
         assert!(root.join("wiki").is_dir());
         assert!(root.join("raw").is_dir());
         assert!(root.join("ingest.md").metadata().unwrap().len() > 0);
+        assert!(root.join("wiki/index.md").is_file());
+        assert!(root.join("wiki/index.md").metadata().unwrap().len() > 0);
+        assert!(root.join("wiki/inbox.md").is_file());
+        assert!(root.join("wiki/inbox.md").metadata().unwrap().len() > 0);
+        assert!(root.join("wiki/log.md").is_file());
+        assert!(root.join("wiki/log.md").metadata().unwrap().len() > 0);
     }
 
     #[test]
