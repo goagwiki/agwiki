@@ -47,7 +47,7 @@
       return;
     }
     const data = await resp.json();
-    const items = (data && data.results) || [];
+    const items = Array.isArray(data) ? data : [];
     show(items.slice(0, 12));
   }
 
@@ -67,4 +67,3 @@
     if (e.key === "Escape") hide();
   });
 })();
-

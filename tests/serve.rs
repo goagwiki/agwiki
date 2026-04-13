@@ -67,8 +67,7 @@ async fn serve_search_returns_json_results() {
         .unwrap();
     assert!(resp.status().is_success());
     let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let results = v["results"].as_array().unwrap();
+    let results: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
     assert!(!results.is_empty());
     assert!(results.iter().any(|r| r["url"] == "/wiki/index"));
 }

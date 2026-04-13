@@ -6,6 +6,7 @@
 //!   content locally.
 
 use anyhow::{Context, Result};
+use axum::extract::ConnectInfo;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{header, HeaderValue, Request, StatusCode, Uri, Version};
 use axum::response::{Html, IntoResponse, Response};
@@ -14,7 +15,7 @@ use axum::{middleware, Json, Router};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::sync::OnceLock;
 use time::{format_description, OffsetDateTime};
 use tokio::net::TcpListener;
 use tokio::signal;
@@ -100,9 +101,12 @@ impl WikiServer {
         let app = state.router();
 
         eprintln!("Serving wiki at {base_url} (Ctrl+C to stop)");
-        axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown_signal())
-            .await?;
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
         Ok(())
     }
 
@@ -168,32 +172,48 @@ async fn shutdown_signal() {
 }
 
 async fn clf_log(req: Request<axum::body::Body>, next: middleware::Next) -> Response {
-    let start = Instant::now();
     let method = req.method().clone();
     let uri = req.uri().clone();
     let version = req.version();
+    let remote = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0.ip().to_string())
+        .unwrap_or_else(|| "-".to_string());
     let resp = next.run(req).await;
     let status = resp.status();
-    let elapsed = start.elapsed();
 
-    // Common Log Format-ish:
+    // Common Log Format:
     // host ident authuser [date] "request" status bytes
     let ts = OffsetDateTime::now_utc();
-    let fmt =
-        format_description::parse("[day]/[month repr:short]/[year]:[hour]:[minute]:[second] +0000")
-            .unwrap_or_default();
-    let ts_s = ts.format(&fmt).unwrap_or_else(|_| "-".to_string());
+    let ts_s = ts
+        .format(clf_timestamp_format())
+        .unwrap_or_else(|_| "-".to_string());
+    let bytes = resp
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("-");
     println!(
-        "- - - [{}] \"{} {} {}\" {} - {}",
+        "{} - - [{}] \"{} {} {}\" {} {}",
+        remote,
         ts_s,
         method,
         uri_to_path_query(&uri),
         version_to_str(version),
         status.as_u16(),
-        elapsed.as_millis()
+        bytes
     );
 
     resp
+}
+
+fn clf_timestamp_format() -> &'static [format_description::FormatItem<'static>] {
+    static FMT: OnceLock<Vec<format_description::FormatItem<'static>>> = OnceLock::new();
+    FMT.get_or_init(|| {
+        format_description::parse("[day]/[month repr:short]/[year]:[hour]:[minute]:[second] +0000")
+            .unwrap_or_default()
+    })
 }
 
 fn uri_to_path_query(uri: &Uri) -> String {
@@ -282,7 +302,7 @@ pub mod handlers {
     ) -> Response {
         let query = q.q.unwrap_or_default();
         let results = state.search(query.trim());
-        Json(serde_json::json!({ "results": results })).into_response()
+        Json(results).into_response()
     }
 
     pub async fn assets(
