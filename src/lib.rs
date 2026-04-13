@@ -8,6 +8,7 @@
 pub mod export_skill;
 pub mod ingest;
 pub mod init;
+pub mod serve;
 pub mod toolkit;
 pub mod upkeep;
 pub mod validate;

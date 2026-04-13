@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use agwiki::export_skill::{run_export, ExportOptions};
 use agwiki::ingest::{resolve_ingest_source, run_aikit};
 use agwiki::init::run_init;
+use agwiki::serve::{run_serve_blocking, ServerConfig};
 use agwiki::toolkit::{expand_ingest_prompt, require_wiki_ingest_prompt};
 use agwiki::upkeep::validate_wiki_root;
 use agwiki::validate::validate_wiki;
@@ -50,6 +51,11 @@ Runs wiki validation and prints warnings on stderr if there are broken links or 
         after_help = "Example:\n  agwiki export-skill\n  agwiki export-skill --prune\n  agwiki export-skill -C /path/to/wiki --dry-run\n  `-C` / `--wiki-root` defaults to the current working directory when omitted.\n  Use `agwiki validate` in CI for a non-zero exit on issues."
     )]
     ExportSkill(ExportArgs),
+    /// Start a local HTTP server to browse the wiki in a web UI
+    #[command(
+        after_help = "Example:\n  agwiki serve\n  agwiki serve --open\n  agwiki serve --port 8081\n  agwiki serve --host 0.0.0.0 --port 8080\n  agwiki serve -C /path/to/wiki --open\n  `-C` / `--wiki-root` defaults to the current working directory when omitted."
+    )]
+    Serve(ServeArgs),
 }
 
 #[derive(clap::Args)]
@@ -144,6 +150,18 @@ struct ExportArgs {
     prune: bool,
 }
 
+#[derive(clap::Args)]
+struct ServeArgs {
+    #[command(flatten)]
+    wiki: WikiRootArgs,
+    #[arg(long, default_value_t = 8080, help = "Port to listen on")]
+    port: u16,
+    #[arg(long, default_value = "127.0.0.1", help = "Host/IP address to bind to")]
+    host: String,
+    #[arg(long, help = "Automatically open wiki in default browser")]
+    open: bool,
+}
+
 fn resolve_wiki_root(opt: Option<PathBuf>) -> Result<PathBuf> {
     let p = opt
         .map(Ok)
@@ -188,6 +206,15 @@ fn main() -> Result<()> {
                 skill_md: a.skill_md.as_deref(),
                 dry_run: a.dry_run,
                 prune: a.prune,
+            })?;
+        }
+        Commands::Serve(a) => {
+            let root = resolve_wiki_root(a.wiki.wiki_root)?;
+            run_serve_blocking(ServerConfig {
+                port: a.port,
+                host: a.host,
+                open_browser: a.open,
+                wiki_root: root,
             })?;
         }
     }
