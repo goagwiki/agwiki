@@ -60,10 +60,7 @@ fn merge_skill_replaces_marked_block() {
 
 #[test]
 fn merge_skill_errors_on_end_without_start() {
-    let r = merge_skill_generated_index(
-        &format!("x\n{}\n", GENERATED_INDEX_END),
-        "## Wiki index",
-    );
+    let r = merge_skill_generated_index(&format!("x\n{}\n", GENERATED_INDEX_END), "## Wiki index");
     assert!(r.is_err());
 }
 
