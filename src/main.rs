@@ -29,9 +29,9 @@ enum Commands {
         after_help = "Example:\n  agwiki init\n  agwiki init ./my-wiki\n  Fails if the target directory exists and is not empty."
     )]
     Init(InitArgs),
-    /// Run ingest via `aikit run` with `--events` (NDJSON progress on stdout; see `aikit run --help`).
+    /// Run ingest via aikit-sdk (NDJSON progress on stdout from SDK event callback).
     ///
-    /// Expands `{{INGEST_PATH}}` and `{{WIKI_ROOT}}` in `<wiki-root>/ingest.md`. **`-a` / `--agent` is required** (no default). Optional `-m`, `--stream` as for `aikit run`.
+    /// Expands `{{INGEST_PATH}}` and `{{WIKI_ROOT}}` in `<wiki-root>/ingest.md`. **`-a` / `--agent` is required** (no default; see aikit-sdk / agent keys). Optional `-m`, `--stream`.
     #[command(
         after_help = "Example:\n  agwiki ingest -a opencode ./raw/note.md\n  agwiki ingest -C /path/to/wiki -a claude ./raw/note.md\n  agwiki ingest --stream -a opencode ./raw/note.md\n  agwiki ingest -a opencode -m MODEL ./raw/note.md\n  `-C` / `--wiki-root` defaults to the current working directory when omitted."
     )]
@@ -95,19 +95,19 @@ struct IngestArgs {
         short = 'a',
         long = "agent",
         value_name = "NAME",
-        help = "Agent for `aikit run -a` (required; e.g. opencode, claude, codex, gemini)"
+        help = "Agent key for aikit-sdk / agent keys (required; e.g. opencode, claude, codex, gemini)"
     )]
     agent: String,
     #[arg(
         short = 'm',
         long = "model",
         value_name = "MODEL",
-        help = "Optional model for `aikit run -m`"
+        help = "Optional model override passed to aikit-sdk"
     )]
     model: Option<String>,
     #[arg(
         long,
-        help = "Pass `--stream` to `aikit run` (with `--events`) for agent-native streaming where supported"
+        help = "Enable agent-native streaming via aikit-sdk where supported"
     )]
     stream: bool,
     #[arg(help = "Markdown source file (resolved from cwd, must exist, .md extension)")]
