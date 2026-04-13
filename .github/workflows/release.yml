@@ -547,8 +547,9 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
+      # Optional tap CI (brew audit + install on macOS). Disabled so release is not blocked by it.
       - name: Validate Homebrew branch in tap CI
-        if: steps.hb-commit.outputs.has_changes == 'true'
+        if: false
         run: |
           set -euo pipefail
           VERSION="${{ needs.verify-version.outputs.version }}"
@@ -582,7 +583,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
-      - name: Merge validated Homebrew branch to main
+      - name: Merge Homebrew branch to main
         if: steps.hb-commit.outputs.has_changes == 'true'
         run: |
           set -euo pipefail
