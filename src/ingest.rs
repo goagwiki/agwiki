@@ -88,6 +88,30 @@ mod tests {
     }
 
     #[test]
+    fn resolve_ingest_source_handles_missing_file() {
+        let tmp = tempdir().unwrap();
+        let missing = tmp.path().join("missing.md");
+        assert!(resolve_ingest_source(&missing).is_err());
+    }
+
+    #[test]
+    fn resolve_ingest_source_accepts_uppercase_md() {
+        let tmp = tempdir().unwrap();
+        let f = tmp.path().join("note.MD");
+        fs::write(&f, "content").unwrap();
+        let result = resolve_ingest_source(&f);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn resolve_ingest_source_rejects_no_extension() {
+        let tmp = tempdir().unwrap();
+        let f = tmp.path().join("note");
+        fs::write(&f, "content").unwrap();
+        assert!(resolve_ingest_source(&f).is_err());
+    }
+
+    #[test]
     fn agent_not_runnable_returns_error() {
         let tmp = tempdir().unwrap();
         let err =
