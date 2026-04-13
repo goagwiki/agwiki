@@ -116,7 +116,7 @@ struct IngestArgs {
         help = "Enable agent-native streaming via aikit-sdk where supported"
     )]
     stream: bool,
-    #[arg(help = "Markdown source file (resolved from cwd, must exist, .md extension)")]
+    #[arg(help = "Text source file (resolved from cwd, must exist and contain text content)")]
     file: PathBuf,
 }
 

@@ -9,20 +9,42 @@ use std::path::{Path, PathBuf};
 
 use aikit_sdk::{is_runnable, run_agent_events, runnable_agents, RunOptions};
 
-/// Canonicalize `file`, ensure it exists and has a `.md` extension.
+/// Canonicalize `file`, ensure it exists and contains valid text content.
 pub fn resolve_ingest_source(file: &Path) -> Result<PathBuf> {
     let file = file
         .canonicalize()
         .with_context(|| format!("not found: {}", file.display()))?;
-    let ext = file
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if ext != "md" {
-        bail!("expected .md file, got: {}", file.display());
-    }
+
+    validate_text_file(&file)?;
+
     Ok(file)
+}
+
+/// Validate that `path` contains text content (UTF-8 encoded, no null bytes).
+fn validate_text_file(path: &Path) -> Result<()> {
+    use std::fs::File;
+    use std::io::Read;
+
+    let mut file =
+        File::open(path).with_context(|| format!("cannot read file: {}", path.display()))?;
+
+    let mut buffer = [0u8; 8192];
+    let bytes_read = file
+        .read(&mut buffer)
+        .with_context(|| format!("failed to read from file: {}", path.display()))?;
+
+    let sample = &buffer[..bytes_read];
+
+    // Check for null bytes (binary indicator)
+    if sample.contains(&0) {
+        bail!("file appears to be binary: {}", path.display());
+    }
+
+    // Validate UTF-8 encoding
+    std::str::from_utf8(sample)
+        .with_context(|| format!("file does not contain valid UTF-8 text: {}", path.display()))?;
+
+    Ok(())
 }
 
 /// Run ingest via `aikit_sdk::run_agent_events`; emits NDJSON events on stdout.
@@ -80,11 +102,64 @@ mod tests {
     }
 
     #[test]
-    fn resolve_ingest_source_rejects_non_md() {
+    fn resolve_ingest_source_accepts_txt() {
         let tmp = tempdir().unwrap();
         let f = tmp.path().join("x.txt");
-        fs::write(&f, "x").unwrap();
-        assert!(resolve_ingest_source(&f).is_err());
+        fs::write(&f, "hello text").unwrap();
+        assert!(resolve_ingest_source(&f).is_ok());
+    }
+
+    #[test]
+    fn resolve_ingest_source_accepts_json() {
+        let tmp = tempdir().unwrap();
+        let f = tmp.path().join("data.json");
+        fs::write(&f, r#"{"key": "value"}"#).unwrap();
+        assert!(resolve_ingest_source(&f).is_ok());
+    }
+
+    #[test]
+    fn resolve_ingest_source_accepts_yaml() {
+        let tmp = tempdir().unwrap();
+        let f = tmp.path().join("config.yaml");
+        fs::write(&f, "key: value\n").unwrap();
+        assert!(resolve_ingest_source(&f).is_ok());
+    }
+
+    #[test]
+    fn resolve_ingest_source_accepts_log() {
+        let tmp = tempdir().unwrap();
+        let f = tmp.path().join("app.log");
+        fs::write(&f, "INFO: started\n").unwrap();
+        assert!(resolve_ingest_source(&f).is_ok());
+    }
+
+    #[test]
+    fn resolve_ingest_source_rejects_binary() {
+        let tmp = tempdir().unwrap();
+        let f = tmp.path().join("binary.bin");
+        fs::write(&f, b"binary\x00content").unwrap();
+        let err = resolve_ingest_source(&f).unwrap_err();
+        assert!(
+            err.to_string().contains("file appears to be binary"),
+            "error: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_ingest_source_rejects_invalid_utf8() {
+        let tmp = tempdir().unwrap();
+        let f = tmp.path().join("bad.txt");
+        fs::write(&f, b"\xff\xfe invalid utf8 bytes").unwrap();
+        let err = resolve_ingest_source(&f).unwrap_err();
+        assert!(err.to_string().contains("valid UTF-8"), "error: {err}");
+    }
+
+    #[test]
+    fn resolve_ingest_source_accepts_empty_file() {
+        let tmp = tempdir().unwrap();
+        let f = tmp.path().join("empty.txt");
+        fs::write(&f, b"").unwrap();
+        assert!(resolve_ingest_source(&f).is_ok());
     }
 
     #[test]
@@ -104,11 +179,11 @@ mod tests {
     }
 
     #[test]
-    fn resolve_ingest_source_rejects_no_extension() {
+    fn resolve_ingest_source_accepts_no_extension() {
         let tmp = tempdir().unwrap();
         let f = tmp.path().join("note");
         fs::write(&f, "content").unwrap();
-        assert!(resolve_ingest_source(&f).is_err());
+        assert!(resolve_ingest_source(&f).is_ok());
     }
 
     #[test]
