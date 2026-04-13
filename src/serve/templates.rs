@@ -77,8 +77,14 @@ where
                 .split_once('|')
                 .map(|(a, b)| (a.trim(), b.trim()))
                 .unwrap_or((inner.trim(), inner.trim()));
-            if let Some(dest) = norm_wikilink_target(wiki_dir, target) {
+            let (t_path, frag) = target.split_once('#').unwrap_or((target, ""));
+            if let Some(dest) = norm_wikilink_target(wiki_dir, t_path) {
                 if let Some(url) = url_for(&dest) {
+                    let url = if frag.trim().is_empty() {
+                        url
+                    } else {
+                        format!("{url}#{}", frag.trim())
+                    };
                     return Cow::Owned(format!("[{}]({})", label, url));
                 }
             }
@@ -92,11 +98,17 @@ where
             return Cow::Owned(full);
         };
         let target = target_m.as_str();
-        let Some(dest) = norm_md_link(wiki_dir, src_md, target) else {
+        let (t_path, frag) = target.split_once('#').unwrap_or((target, ""));
+        let Some(dest) = norm_md_link(wiki_dir, src_md, t_path) else {
             return Cow::Owned(full);
         };
         let Some(url) = url_for(&dest) else {
             return Cow::Owned(full);
+        };
+        let url = if frag.trim().is_empty() {
+            url
+        } else {
+            format!("{url}#{}", frag.trim())
         };
 
         let full_start = caps.get(0).unwrap().start();
@@ -177,5 +189,30 @@ mod tests {
         let html = markdown_to_html("# T\n\n<script>alert(1)</script>\n");
         assert!(!html.contains("<script>"));
         assert!(html.contains("<h1>"));
+    }
+
+    #[test]
+    fn rewrite_links_preserves_fragments() {
+        let tmp = tempdir().unwrap();
+        let wiki_dir = tmp.path().join("wiki");
+        fs::create_dir_all(&wiki_dir).unwrap();
+        let src = wiki_dir.join("index.md");
+        fs::write(&src, "See [[a#sec|A]] and [A](a.md#sec)\n\n").unwrap();
+        fs::write(wiki_dir.join("a.md"), "# A\n").unwrap();
+
+        let md = fs::read_to_string(&src).unwrap();
+        let out = rewrite_links(&md, &src, &wiki_dir, |p| {
+            let rel = p.strip_prefix(&wiki_dir).ok()?;
+            let mut rel_no_ext = rel.to_path_buf();
+            rel_no_ext.set_extension("");
+            Some(format!(
+                "/wiki/{}",
+                rel_no_ext
+                    .to_string_lossy()
+                    .replace(std::path::MAIN_SEPARATOR, "/")
+            ))
+        });
+
+        assert_eq!(out.matches("[A](/wiki/a#sec)").count(), 2);
     }
 }

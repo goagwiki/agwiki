@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -36,7 +36,8 @@ impl SearchIndex {
 
         for path in files {
             let canon = path.canonicalize().unwrap_or(path);
-            let text = std::fs::read_to_string(&canon).unwrap_or_default();
+            let text = std::fs::read_to_string(&canon)
+                .with_context(|| format!("read markdown {}", canon.display()))?;
             file_content.insert(canon.clone(), text.clone());
 
             for (idx, line) in text.lines().enumerate() {
@@ -195,5 +196,17 @@ mod tests {
 
         assert!(results.iter().any(|r| r.url == "/wiki/index"));
         assert!(results.iter().any(|r| r.url == "/wiki/a"));
+    }
+
+    #[test]
+    fn search_index_requires_utf8_markdown() {
+        let tmp = tempdir().unwrap();
+        let wiki_dir = tmp.path().join("wiki");
+        fs::create_dir_all(&wiki_dir).unwrap();
+        fs::write(wiki_dir.join("index.md"), b"# Index\n").unwrap();
+        fs::write(wiki_dir.join("bad.md"), vec![0xff, 0xfe, 0xfd]).unwrap();
+
+        let err = SearchIndex::build(&wiki_dir).unwrap_err().to_string();
+        assert!(err.contains("read markdown"));
     }
 }

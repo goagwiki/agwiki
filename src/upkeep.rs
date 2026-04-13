@@ -79,6 +79,10 @@ pub(crate) fn norm_md_link(wiki: &Path, src_file: &Path, target: &str) -> Option
     if t.is_empty() || t.contains("://") || t.starts_with('#') {
         return None;
     }
+    let t = t.split_once('#').map(|(a, _)| a).unwrap_or(t).trim();
+    if t.is_empty() {
+        return None;
+    }
     let base = src_file.parent()?.canonicalize().ok()?;
     let out = resolve_under_root(&base, Path::new(t))?;
     out.starts_with(wiki).then_some(out)

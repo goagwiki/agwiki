@@ -13,7 +13,7 @@ async fn serve_root_renders_index_and_converts_links() {
     fs::create_dir_all(root.join("wiki/concepts")).unwrap();
     fs::write(
         root.join("wiki/index.md"),
-        "# Index\n\n- [[concepts/hello|Hello]]\n- [Hello md](concepts/hello.md)\n",
+        "# Index\n\n- [[concepts/hello|Hello]]\n- [Hello md](concepts/hello.md)\n- [[concepts/hello#sec|Hello sec]]\n- [Hello sec md](concepts/hello.md#sec)\n",
     )
     .unwrap();
     fs::write(root.join("wiki/concepts/hello.md"), "# Hello\n").unwrap();
@@ -35,6 +35,7 @@ async fn serve_root_renders_index_and_converts_links() {
     let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let html = String::from_utf8_lossy(&body);
     assert!(html.contains("href=\"/wiki/concepts/hello\""));
+    assert!(html.contains("href=\"/wiki/concepts/hello#sec\""));
 }
 
 #[tokio::test]
