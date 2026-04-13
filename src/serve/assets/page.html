@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{TITLE}} - agwiki</title>
+    <link rel="stylesheet" href="/assets/style.css" />
+    <script defer src="/assets/search.js"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-inner">
+        <a class="brand" href="/">agwiki</a>
+        <input
+          id="searchBox"
+          class="search"
+          type="search"
+          placeholder="Search…"
+          autocomplete="off"
+          aria-label="Search wiki"
+        />
+      </div>
+      <div id="searchResults" class="search-results" hidden></div>
+    </header>
+    <main class="container">
+      <article class="page">
+        {{CONTENT}}
+      </article>
+    </main>
+    <footer class="footer">
+      <span class="muted">Current: {{CURRENT_URL}}</span>
+    </footer>
+  </body>
+</html>
+
