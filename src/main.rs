@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
+use agwiki::compile::{run_compile, run_export_html, run_new, CompileOptions};
 use agwiki::export_skill::{run_export, ExportOptions};
 use agwiki::ingest::{resolve_ingest_source, run_aikit, run_folder_ingest};
 use agwiki::init::run_init;
@@ -37,6 +38,21 @@ enum Commands {
         after_help = "Example:\n  agwiki ingest -a opencode ./raw/note.md\n  agwiki ingest -C /path/to/wiki -a claude ./raw/note.md\n  agwiki ingest --stream -a opencode ./raw/note.md\n  agwiki ingest -a opencode -m MODEL ./raw/note.md\n  `-C` / `--wiki-root` defaults to the current working directory when omitted."
     )]
     Ingest(IngestArgs),
+    /// Create a new ontology entity source file under content/<kind>/
+    #[command(
+        after_help = "Example:\n  agwiki new concepts --title \"Knowledge Graphs\"\n  agwiki new -C /path/to/wiki people\n  `-C` / `--wiki-root` defaults to the current working directory when omitted."
+    )]
+    New(NewArgs),
+    /// Validate content sources and render generated markdown into wiki/
+    #[command(
+        after_help = "Example:\n  agwiki compile\n  agwiki compile --dry-run\n  agwiki compile -C /path/to/wiki\n  `-C` / `--wiki-root` defaults to the current working directory when omitted."
+    )]
+    Compile(CompileArgs),
+    /// Validate ontology content sources without writing generated wiki files
+    #[command(
+        after_help = "Example:\n  agwiki validate-sources\n  agwiki validate-sources -C /path/to/wiki\n  `-C` / `--wiki-root` defaults to the current working directory when omitted."
+    )]
+    ValidateSources(ValidateSourcesArgs),
     /// Check broken wikilinks, relative markdown links, and orphan wiki pages
     #[command(
         after_help = "Example:\n  agwiki validate\n  agwiki validate -C /path/to/wiki\n  agwiki validate --format json\n  Exits with status 1 if any broken link or orphan page is found.\n  `-C` / `--wiki-root` defaults to the current working directory when omitted."
@@ -51,6 +67,11 @@ Runs wiki validation and prints warnings on stderr if there are broken links or 
         after_help = "Example:\n  agwiki export-skill\n  agwiki export-skill --prune\n  agwiki export-skill -C /path/to/wiki --dry-run\n  `-C` / `--wiki-root` defaults to the current working directory when omitted.\n  Use `agwiki validate` in CI for a non-zero exit on issues."
     )]
     ExportSkill(ExportArgs),
+    /// Export generated wiki markdown as a static HTML tree
+    #[command(
+        after_help = "Example:\n  agwiki export-html\n  agwiki export-html --out public\n  agwiki export-html -C /path/to/wiki --out dist/html\n  `-C` / `--wiki-root` defaults to the current working directory when omitted."
+    )]
+    ExportHtml(ExportHtmlArgs),
     /// Start a local HTTP server to browse the wiki in a web UI
     #[command(
         after_help = "Example:\n  agwiki serve\n  agwiki serve --open\n  agwiki serve --port 8081\n  agwiki serve --host 0.0.0.0 --port 8080\n  agwiki serve -C /path/to/wiki --open\n  `-C` / `--wiki-root` defaults to the current working directory when omitted."
@@ -135,6 +156,48 @@ struct IngestArgs {
         help = "Maximum number of files to ingest in --folder mode (0 = unlimited, default: 30)"
     )]
     max_files: usize,
+    #[arg(long, help = "Run `agwiki compile` after successful agent ingest")]
+    compile: bool,
+}
+
+#[derive(clap::Args)]
+struct NewArgs {
+    #[command(flatten)]
+    wiki: WikiRootArgs,
+    #[arg(help = "Ontology kind to create, for example `concepts`")]
+    kind: String,
+    #[arg(long, value_name = "TITLE", help = "Initial entity title")]
+    title: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct CompileArgs {
+    #[command(flatten)]
+    wiki: WikiRootArgs,
+    #[arg(
+        long,
+        help = "Validate and print planned writes without changing files"
+    )]
+    dry_run: bool,
+}
+
+#[derive(clap::Args)]
+struct ValidateSourcesArgs {
+    #[command(flatten)]
+    wiki: WikiRootArgs,
+}
+
+#[derive(clap::Args)]
+struct ExportHtmlArgs {
+    #[command(flatten)]
+    wiki: WikiRootArgs,
+    #[arg(
+        long,
+        value_name = "DIR",
+        default_value = "dist/html",
+        help = "Output directory for static HTML (default: dist/html)"
+    )]
+    out: PathBuf,
 }
 
 #[derive(clap::Args)]
@@ -184,6 +247,11 @@ fn resolve_wiki_root(opt: Option<PathBuf>) -> Result<PathBuf> {
         .map(Ok)
         .unwrap_or_else(|| std::env::current_dir().context("current directory"))?;
     validate_wiki_root(&p)
+}
+
+fn resolve_root(opt: Option<PathBuf>) -> Result<PathBuf> {
+    opt.map(Ok)
+        .unwrap_or_else(|| std::env::current_dir().context("current directory"))
 }
 
 fn main() -> Result<()> {
@@ -242,6 +310,40 @@ fn main() -> Result<()> {
                     ));
                 }
             }
+            if a.compile {
+                let report = run_compile(CompileOptions {
+                    wiki_root: root,
+                    dry_run: false,
+                })?;
+                if !report.errors.is_empty() {
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::New(a) => {
+            let root = resolve_root(a.wiki.wiki_root)?;
+            let path = run_new(&root, &a.kind, a.title.as_deref())?;
+            println!("{}", path.display());
+        }
+        Commands::Compile(a) => {
+            let root = resolve_root(a.wiki.wiki_root)?;
+            let report = run_compile(CompileOptions {
+                wiki_root: root,
+                dry_run: a.dry_run,
+            })?;
+            if !report.errors.is_empty() {
+                std::process::exit(1);
+            }
+        }
+        Commands::ValidateSources(a) => {
+            let root = resolve_root(a.wiki.wiki_root)?;
+            let report = run_compile(CompileOptions {
+                wiki_root: root,
+                dry_run: true,
+            })?;
+            if !report.errors.is_empty() {
+                std::process::exit(1);
+            }
         }
         Commands::Validate(a) => {
             let root = resolve_wiki_root(a.wiki.wiki_root)?;
@@ -263,6 +365,15 @@ fn main() -> Result<()> {
                 dry_run: a.dry_run,
                 prune: a.prune,
             })?;
+        }
+        Commands::ExportHtml(a) => {
+            let root = resolve_root(a.wiki.wiki_root)?;
+            let out_dir = if a.out.is_absolute() {
+                a.out
+            } else {
+                root.join(a.out)
+            };
+            run_export_html(&root, &out_dir)?;
         }
         Commands::Serve(a) => {
             let root = resolve_wiki_root(a.wiki.wiki_root)?;

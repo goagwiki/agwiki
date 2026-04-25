@@ -5,9 +5,11 @@
 //! NDJSON events are emitted on stdout through the SDK callback.
 //! Wiki root for ingest, validate, and export-skill defaults to the process current directory when `-C` is omitted.
 
+pub mod compile;
 pub mod export_skill;
 pub mod ingest;
 pub mod init;
+pub mod markdown_html;
 pub mod serve;
 pub mod toolkit;
 pub mod upkeep;
