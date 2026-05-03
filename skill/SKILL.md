@@ -51,6 +51,8 @@ agwiki ingest -a claude ./raw/note.md
 agwiki ingest -C /path/to/wiki -a claude ./raw/note.md
 agwiki ingest --stream -a opencode ./raw/note.md
 agwiki ingest -a opencode -m <MODEL> ./raw/note.md
+agwiki ingest --resume -a codex ./raw/note.md
+agwiki ingest --resume --force -a codex ./raw/note.md
 ```
 
 | Flag | Description |
@@ -60,6 +62,9 @@ agwiki ingest -a opencode -m <MODEL> ./raw/note.md
 | `-C` / `--wiki-root <DIR>` | Wiki root (default: cwd). |
 | `-m` / `--model <MODEL>` | Model override passed to aikit-sdk. |
 | `--stream` | Enable agent-native streaming where supported. |
+| `--resume` | Persist successful ingests to a JSONL ledger and skip re-ingesting sources that already succeeded under the same identity. |
+| `--force` | With `--resume`: force re-ingest even when a matching success record exists (still appends a new success record). |
+| `--ingest-state <FILE>` | With `--resume`: ledger path (default: `<wiki-root>/.agwiki/ingest-state.jsonl`; relative paths resolve under `<wiki-root>`). |
 
 `<FILE>` accepts any UTF-8 text file (`.md`, `.txt`, `.json`, `.yaml`, `.log`, no extension, etc.) — extension is not checked.
 
@@ -71,6 +76,8 @@ agwiki ingest -a claude --folder ./raw --max-files 0
 agwiki ingest -a opencode --folder ./raw --max-files 10
 agwiki ingest -C /path/to/wiki -a claude --folder ./raw
 agwiki ingest --stream -a opencode --folder ./raw
+agwiki ingest --resume -a codex --folder ./raw --max-files 0
+agwiki ingest --resume --ingest-state .agwiki/ingest-state.jsonl -a codex --folder ./raw --max-files 0
 ```
 
 | Flag | Description |
@@ -81,8 +88,11 @@ agwiki ingest --stream -a opencode --folder ./raw
 | `-C` / `--wiki-root <DIR>` | Wiki root (default: cwd). |
 | `-m` / `--model <MODEL>` | Model override passed to aikit-sdk. |
 | `--stream` | Enable agent-native streaming where supported. |
+| `--resume` | Persist successful ingests to a JSONL ledger and skip sources that already succeeded under the same identity. |
+| `--force` | With `--resume`: force re-ingest even when a matching success record exists. |
+| `--ingest-state <FILE>` | With `--resume`: ledger path (default: `<wiki-root>/.agwiki/ingest-state.jsonl`; relative paths resolve under `<wiki-root>`). |
 
-**Batch behaviour:** Continues through all discovered files even if individual ones fail. Prints a summary to **stderr** (`Batch ingest: X total, Y succeeded, Z failed.`) and lists each failure. Exits **1** if any file failed.
+**Batch behaviour:** Continues through all discovered files even if individual ones fail. Prints a summary to **stderr** (`Batch ingest: X total, Y succeeded, (skipped), Z failed.`) and lists each failure. Exits **1** if any file failed.
 
 ### `agwiki validate`
 
@@ -143,6 +153,8 @@ agwiki serve -C /path/to/wiki --open
 **Ingest a raw note:** Place or keep the source under **`raw/`** (agents must **not** edit **`raw/`**). Run `agwiki ingest -a <agent> ./raw/note.md` from a cwd where the path resolves. The agent follows rules in **`ingest.md`**: work only under **`wiki/`**, prefer updating existing pages, link related pages, keep **`wiki/index.md`** current, append to **`wiki/log.md`**, use **`wiki/sources/`** and `templates/source-page.md` per the embedded workflow. For the full rule text, read **`ingest.md`** in the wiki root (or upstream `prompts/ingest.md`).
 
 **Batch ingest (≥ 0.1.11):** `agwiki ingest -a opencode --folder ./raw` — discovers all `*.md` recursively, default cap of 30 files (pass `--max-files 0` for unlimited).
+
+**Resume ingest:** `agwiki ingest --resume -a codex ./raw/note.md` — appends a success record to `<wiki-root>/.agwiki/ingest-state.jsonl` and skips subsequent runs if the same identity matches (wiki root + source key + source hash + `ingest.md` hash + agent + model).
 
 **Publish a skill bundle:** Keep **`wiki/index.md`** wikilinks accurate so the generated index matches intent → `agwiki export-skill --dry-run` to preview → `agwiki export-skill` (add **`--prune`** when wiki pages were removed so stale `skill/references/**` files drop).
 
