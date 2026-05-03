@@ -35,7 +35,7 @@ time = { version = "0.3", features = ["formatting"] }
 tokio = { version = "1.37", features = ["macros", "net", "rt", "rt-multi-thread", "signal"] }
 toml = "0.8"
 tower = "0.5"
-tower-http = { version = "0.5", features = ["trace"] }
+tower-http = { version = "0.6", features = ["trace"] }
 webbrowser = "1.0"
 
 
