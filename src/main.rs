@@ -6,10 +6,13 @@ use std::path::PathBuf;
 
 use agwiki::compile::{run_compile, run_export_html, run_new, CompileOptions};
 use agwiki::export_skill::{run_export, ExportOptions};
-use agwiki::ingest::{resolve_ingest_source, run_aikit, run_folder_ingest};
+use agwiki::ingest::{
+    run_folder_ingest, run_folder_ingest_with_resume, run_ingest_file_with_resume,
+    IngestResumeConfig,
+};
 use agwiki::init::run_init;
 use agwiki::serve::{run_serve_blocking, ServerConfig};
-use agwiki::toolkit::{expand_ingest_prompt, require_wiki_ingest_prompt};
+use agwiki::toolkit::require_wiki_ingest_prompt;
 use agwiki::upkeep::validate_wiki_root;
 use agwiki::validate::validate_wiki;
 
@@ -35,7 +38,7 @@ enum Commands {
     ///
     /// Expands `{{INGEST_PATH}}` and `{{WIKI_ROOT}}` in `<wiki-root>/ingest.md`. **`-a` / `--agent` is required** (no default; see aikit-sdk / agent keys). Optional `-m`, `--stream`.
     #[command(
-        after_help = "Example:\n  agwiki ingest -a opencode ./raw/note.md\n  agwiki ingest -C /path/to/wiki -a claude ./raw/note.md\n  agwiki ingest --stream -a opencode ./raw/note.md\n  agwiki ingest -a opencode -m MODEL ./raw/note.md\n  `-C` / `--wiki-root` defaults to the current working directory when omitted."
+        after_help = "Example:\n  agwiki ingest -a opencode ./raw/note.md\n  agwiki ingest -C /path/to/wiki -a claude ./raw/note.md\n  agwiki ingest --stream -a opencode ./raw/note.md\n  agwiki ingest -a opencode -m MODEL ./raw/note.md\n  agwiki ingest --resume -a codex ./raw/note.md\n  agwiki ingest --resume --force -a codex ./raw/note.md\n  agwiki ingest --resume --ingest-state .agwiki/ingest-state.jsonl -a codex --folder ./raw --max-files 0\n  `-C` / `--wiki-root` defaults to the current working directory when omitted."
     )]
     Ingest(IngestArgs),
     /// Create a new ontology entity source file under content/<kind>/
@@ -158,6 +161,24 @@ struct IngestArgs {
     max_files: usize,
     #[arg(long, help = "Run `agwiki compile` after successful agent ingest")]
     compile: bool,
+    #[arg(
+        long,
+        help = "Enable resume mode: persist successes to an ingest-state ledger and skip sources already successfully ingested under the same identity"
+    )]
+    resume: bool,
+    #[arg(
+        long,
+        requires = "resume",
+        help = "Force re-ingest even when resume mode finds a matching success record (still appends a new success record)"
+    )]
+    force: bool,
+    #[arg(
+        long = "ingest-state",
+        value_name = "FILE",
+        requires = "resume",
+        help = "Path to the append-only ingest-state JSONL ledger (default: <wiki-root>/.agwiki/ingest-state.jsonl; relative paths are resolved under <wiki-root>)"
+    )]
+    ingest_state: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]
@@ -268,35 +289,82 @@ fn main() -> Result<()> {
             }
             let model = a.model.as_deref().map(str::trim).filter(|s| !s.is_empty());
 
+            let resume_cfg = if a.resume {
+                let state_path = a
+                    .ingest_state
+                    .clone()
+                    .map(|p| if p.is_absolute() { p } else { root.join(p) })
+                    .unwrap_or_else(|| root.join(".agwiki/ingest-state.jsonl"));
+                Some(IngestResumeConfig {
+                    resume: true,
+                    force: a.force,
+                    ingest_state_path: state_path,
+                })
+            } else {
+                None
+            };
+
             match (a.file, a.folder) {
                 (Some(file), None) => {
-                    let ingest_path = resolve_ingest_source(&file)?;
                     let prompt_path = require_wiki_ingest_prompt(&root)?;
-                    let prompt = expand_ingest_prompt(&root, &ingest_path, &prompt_path)?;
-                    run_aikit(&root, &prompt, agent, model, a.stream)?;
-                }
-                (None, Some(folder)) => {
-                    let prompt_path = require_wiki_ingest_prompt(&root)?;
-                    let result = run_folder_ingest(
+                    run_ingest_file_with_resume(
                         &root,
-                        &folder,
+                        &file,
                         &prompt_path,
                         agent,
                         model,
                         a.stream,
-                        a.max_files,
+                        resume_cfg.as_ref(),
                     )?;
-                    eprintln!(
-                        "Batch ingest: {} total, {} succeeded, {} failed.",
-                        result.total,
-                        result.succeeded,
-                        result.failures.len()
-                    );
-                    for (path, err) in &result.failures {
-                        eprintln!("  FAILED: {} — {}", path.display(), err);
-                    }
-                    if !result.failures.is_empty() {
-                        std::process::exit(1);
+                }
+                (None, Some(folder)) => {
+                    let prompt_path = require_wiki_ingest_prompt(&root)?;
+                    if let Some(cfg) = resume_cfg.as_ref() {
+                        let result = run_folder_ingest_with_resume(
+                            &root,
+                            &folder,
+                            &prompt_path,
+                            agent,
+                            model,
+                            a.stream,
+                            a.max_files,
+                            Some(cfg),
+                        )?;
+                        eprintln!(
+                            "Batch ingest: {} total, {} succeeded, {} skipped, {} failed.",
+                            result.total,
+                            result.succeeded,
+                            result.skipped,
+                            result.failures.len()
+                        );
+                        for (path, err) in &result.failures {
+                            eprintln!("  FAILED: {} — {}", path.display(), err);
+                        }
+                        if !result.failures.is_empty() {
+                            std::process::exit(1);
+                        }
+                    } else {
+                        let result = run_folder_ingest(
+                            &root,
+                            &folder,
+                            &prompt_path,
+                            agent,
+                            model,
+                            a.stream,
+                            a.max_files,
+                        )?;
+                        eprintln!(
+                            "Batch ingest: {} total, {} succeeded, {} failed.",
+                            result.total,
+                            result.succeeded,
+                            result.failures.len()
+                        );
+                        for (path, err) in &result.failures {
+                            eprintln!("  FAILED: {} — {}", path.display(), err);
+                        }
+                        if !result.failures.is_empty() {
+                            std::process::exit(1);
+                        }
                     }
                 }
                 (Some(_), Some(_)) => {

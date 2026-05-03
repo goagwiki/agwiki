@@ -4,11 +4,622 @@
 //! Always emits an NDJSON event stream on stdout via the SDK callback (one JSON line per event).
 
 use anyhow::{bail, Context, Result};
-use std::io::Write;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::fs::OpenOptions;
+use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use crate::toolkit::expand_ingest_prompt;
 use aikit_sdk::{is_runnable, run_agent_events, runnable_agents, RunOptions};
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
+
+const CODE_INGEST_STATE_LOCKED: &str = "AGWIKI_INGEST_STATE_LOCKED";
+const CODE_INGEST_STATE_READ_FAILED: &str = "AGWIKI_INGEST_STATE_READ_FAILED";
+const CODE_INGEST_STATE_WRITE_FAILED: &str = "AGWIKI_INGEST_STATE_WRITE_FAILED";
+const CODE_INGEST_STATE_UTF8_PATH: &str = "AGWIKI_INGEST_STATE_UTF8_PATH";
+
+/// Ledger record schema for a single successful ingest (JSON Lines / `.jsonl`).
+///
+/// Records are appended only after an agent run succeeds.
+///
+/// Example (one JSON line):
+/// ```json
+/// {"schema_version":1,"status":"success","wiki_root":"/abs/wiki","source_key":"raw/note.md","content_sha256":"<64-hex>","ingest_policy_sha256":"<64-hex>","agent":"codex","model":null,"completed_at":"2026-04-25T23:10:00Z","agwiki_version":"0.2.0"}
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IngestStateRecordV1 {
+    /// Schema version (MUST be `1`).
+    pub schema_version: u32,
+    /// Record status.
+    pub status: IngestStatus,
+    /// Canonical wiki root path as UTF-8.
+    pub wiki_root: String,
+    /// Stable source identity key.
+    pub source_key: String,
+    /// SHA-256 of source file bytes (lowercase hex).
+    pub content_sha256: String,
+    /// SHA-256 of `<wiki-root>/ingest.md` bytes (lowercase hex).
+    pub ingest_policy_sha256: String,
+    /// Agent key used for the ingest.
+    pub agent: String,
+    /// Optional model override.
+    pub model: Option<String>,
+    /// Completion time (RFC3339 UTC).
+    pub completed_at: String,
+    /// `agwiki` version (from `CARGO_PKG_VERSION`).
+    pub agwiki_version: String,
+}
+
+/// Ledger record status.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IngestStatus {
+    /// A completed ingest where the agent run succeeded.
+    Success,
+}
+
+/// Identity key used to decide whether a prior success record can be reused.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct IngestIdentity {
+    pub wiki_root: String,
+    pub source_key: String,
+    pub content_sha256: String,
+    pub ingest_policy_sha256: String,
+    pub agent: String,
+    pub model: Option<String>,
+}
+
+/// Configuration for resume mode.
+#[derive(Debug, Clone)]
+pub struct IngestResumeConfig {
+    /// Enable resume ledger behavior.
+    pub resume: bool,
+    /// Force ingest even when a matching success record exists.
+    pub force: bool,
+    /// Path to the append-only JSON Lines ledger file.
+    pub ingest_state_path: PathBuf,
+}
+
+#[derive(Debug)]
+struct IngestStateLock {
+    path: PathBuf,
+    _file: std::fs::File,
+}
+
+impl IngestStateLock {
+    fn acquire(ingest_state_path: &Path) -> Result<Self> {
+        let lock_path = lock_path_for(ingest_state_path);
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create lock parent dir {}", parent.display()))?;
+        }
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)
+        {
+            Ok(file) => Ok(Self {
+                path: lock_path,
+                _file: file,
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => bail!(
+                "{CODE_INGEST_STATE_LOCKED}: ingest-state lock already held at {} (another ingest may be in progress)",
+                lock_path.display()
+            ),
+            Err(e) => bail!(
+                "{CODE_INGEST_STATE_LOCKED}: failed to acquire ingest-state lock at {}: {e}",
+                lock_path.display()
+            ),
+        }
+    }
+}
+
+impl Drop for IngestStateLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn lock_path_for(ingest_state_path: &Path) -> PathBuf {
+    let mut s = ingest_state_path.as_os_str().to_os_string();
+    s.push(".lock");
+    PathBuf::from(s)
+}
+
+fn path_to_utf8_slash(path: &Path) -> Result<String> {
+    let mut out = String::new();
+    let mut first = true;
+    for c in path.components() {
+        let part = match c {
+            std::path::Component::Normal(s) => s.to_str().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{CODE_INGEST_STATE_UTF8_PATH}: path component is not valid UTF-8"
+                )
+            })?,
+            std::path::Component::CurDir => continue,
+            std::path::Component::ParentDir => "..",
+            std::path::Component::RootDir => continue,
+            std::path::Component::Prefix(_) => {
+                return Err(anyhow::anyhow!(
+                    "{CODE_INGEST_STATE_UTF8_PATH}: path contains a platform prefix and cannot be represented as a UTF-8 relative source key"
+                ))
+            }
+        };
+        if first {
+            first = false;
+        } else {
+            out.push('/');
+        }
+        out.push_str(part);
+    }
+    Ok(out)
+}
+
+/// Load the ingest-state ledger file into a lookup map keyed by [`IngestIdentity`].
+///
+/// MUST error on invalid JSON lines when `resume == true`.
+///
+/// Example:
+/// ```no_run
+/// # use std::path::Path;
+/// # use agwiki::ingest::load_ingest_state;
+/// let _state = load_ingest_state(Path::new(".agwiki/ingest-state.jsonl"), true)?;
+/// # Ok::<(), anyhow::Error>(())
+/// ```
+pub fn load_ingest_state(
+    path: &Path,
+    resume: bool,
+) -> Result<HashMap<IngestIdentity, IngestStateRecordV1>> {
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(e) => bail!(
+            "{CODE_INGEST_STATE_READ_FAILED}: failed to open ingest-state ledger {}: {e}",
+            path.display()
+        ),
+    };
+
+    let reader = std::io::BufReader::new(file);
+    let mut out: HashMap<IngestIdentity, IngestStateRecordV1> = HashMap::new();
+
+    for (line_no, line) in reader.lines().enumerate() {
+        let line = line.map_err(|e| {
+            anyhow::anyhow!(
+                "{CODE_INGEST_STATE_READ_FAILED}: failed to read ingest-state ledger {}: {e}",
+                path.display()
+            )
+        })?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let rec: IngestStateRecordV1 = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(e) if resume => {
+                return Err(anyhow::anyhow!(
+                    "{CODE_INGEST_STATE_READ_FAILED}: invalid JSON at {}:{}: {e}",
+                    path.display(),
+                    line_no + 1
+                ))
+            }
+            Err(_) => continue,
+        };
+        if rec.schema_version != 1 || rec.status != IngestStatus::Success {
+            continue;
+        }
+        let key = IngestIdentity {
+            wiki_root: rec.wiki_root.clone(),
+            source_key: rec.source_key.clone(),
+            content_sha256: rec.content_sha256.clone(),
+            ingest_policy_sha256: rec.ingest_policy_sha256.clone(),
+            agent: rec.agent.clone(),
+            model: rec.model.clone(),
+        };
+        out.insert(key, rec);
+    }
+
+    Ok(out)
+}
+
+/// Compute SHA-256 as lowercase hex (raw file bytes).
+///
+/// Example:
+/// ```no_run
+/// # use std::path::Path;
+/// # use agwiki::ingest::sha256_hex_file;
+/// let sha = sha256_hex_file(Path::new("ingest.md"))?;
+/// assert_eq!(sha.len(), 64);
+/// # Ok::<(), anyhow::Error>(())
+/// ```
+pub fn sha256_hex_file(path: &Path) -> Result<String> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("read file for sha256: {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let digest = hasher.finalize();
+    Ok(digest.iter().map(|b| format!("{:02x}", b)).collect())
+}
+
+/// Compute SHA-256 of `<wiki-root>/ingest.md` (raw file bytes, not expanded).
+///
+/// Example:
+/// ```no_run
+/// # use std::path::Path;
+/// # use agwiki::ingest::ingest_policy_sha256;
+/// let sha = ingest_policy_sha256(Path::new("."))?;
+/// assert_eq!(sha.len(), 64);
+/// # Ok::<(), anyhow::Error>(())
+/// ```
+pub fn ingest_policy_sha256(wiki_root: &Path) -> Result<String> {
+    sha256_hex_file(&wiki_root.join("ingest.md"))
+}
+
+/// Compute a stable `source_key` for a canonical source path.
+///
+/// If the source is under canonical `wiki_root`, the key is the UTF-8 relative
+/// path from `wiki_root` using `/` separators. Otherwise, the key is the UTF-8
+/// absolute canonical path.
+///
+/// Example:
+/// ```no_run
+/// # use std::path::Path;
+/// # use agwiki::ingest::source_key_for;
+/// let key = source_key_for(Path::new("/abs/wiki"), Path::new("/abs/wiki/raw/note.md"))?;
+/// assert_eq!(key, "raw/note.md");
+/// # Ok::<(), anyhow::Error>(())
+/// ```
+pub fn source_key_for(wiki_root: &Path, canonical_source: &Path) -> Result<String> {
+    if canonical_source.starts_with(wiki_root) {
+        let rel = canonical_source
+            .strip_prefix(wiki_root)
+            .expect("prefix checked");
+        return path_to_utf8_slash(rel);
+    }
+    canonical_source
+        .to_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{CODE_INGEST_STATE_UTF8_PATH}: source path is not valid UTF-8: {}",
+                canonical_source.display()
+            )
+        })
+}
+
+/// Append a success record as a single JSON line.
+///
+/// MUST be called only after the agent succeeds.
+///
+/// Example:
+/// ```no_run
+/// # use std::path::Path;
+/// # use agwiki::ingest::{append_ingest_success, IngestStateRecordV1, IngestStatus};
+/// let rec = IngestStateRecordV1{
+///   schema_version: 1,
+///   status: IngestStatus::Success,
+///   wiki_root: "/abs/wiki".to_string(),
+///   source_key: "raw/note.md".to_string(),
+///   content_sha256: "0".repeat(64),
+///   ingest_policy_sha256: "1".repeat(64),
+///   agent: "codex".to_string(),
+///   model: None,
+///   completed_at: "2026-01-01T00:00:00Z".to_string(),
+///   agwiki_version: env!("CARGO_PKG_VERSION").to_string(),
+/// };
+/// append_ingest_success(Path::new(".agwiki/ingest-state.jsonl"), &rec)?;
+/// # Ok::<(), anyhow::Error>(())
+/// ```
+pub fn append_ingest_success(path: &Path, record: &IngestStateRecordV1) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            anyhow::anyhow!(
+                "{CODE_INGEST_STATE_WRITE_FAILED}: failed to create ingest-state parent dir {}: {e}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "{CODE_INGEST_STATE_WRITE_FAILED}: failed to open ingest-state ledger {} for append: {e}",
+                path.display()
+            )
+        })?;
+
+    let line = serde_json::to_string(record).map_err(|e| {
+        anyhow::anyhow!(
+            "{CODE_INGEST_STATE_WRITE_FAILED}: failed to serialize ingest-state record: {e}"
+        )
+    })?;
+    writeln!(&mut file, "{}", line).map_err(|e| {
+        anyhow::anyhow!(
+            "{CODE_INGEST_STATE_WRITE_FAILED}: failed to append ingest-state record to {}: {e}",
+            path.display()
+        )
+    })?;
+    Ok(())
+}
+
+/// Outcome of a resume-aware single-file ingest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngestFileOutcome {
+    /// The file was ingested (agent executed).
+    Ingested,
+    /// The file was skipped due to a matching prior success record.
+    Skipped,
+}
+
+/// Run a single-file ingest with optional resume semantics.
+///
+/// MUST preserve existing stdout NDJSON behavior for agent events when ingesting.
+/// When skipping, prints a single-line skip notice to stderr.
+///
+/// Example:
+/// ```no_run
+/// # use std::path::Path;
+/// # use agwiki::ingest::{run_ingest_file_with_resume, IngestResumeConfig};
+/// let cfg = IngestResumeConfig{ resume: true, force: false, ingest_state_path: Path::new(".agwiki/ingest-state.jsonl").to_path_buf() };
+/// let _ = run_ingest_file_with_resume(Path::new("."), Path::new("raw/note.md"), Path::new("ingest.md"), "codex", None, false, Some(&cfg))?;
+/// # Ok::<(), anyhow::Error>(())
+/// ```
+pub fn run_ingest_file_with_resume(
+    wiki_root: &Path,
+    source_file: &Path,
+    prompt_path: &Path,
+    agent: &str,
+    model: Option<&str>,
+    stream: bool,
+    resume: Option<&IngestResumeConfig>,
+) -> Result<IngestFileOutcome> {
+    let Some(cfg) = resume.filter(|c| c.resume) else {
+        run_ingest_for_path(wiki_root, source_file, prompt_path, agent, model, stream)?;
+        return Ok(IngestFileOutcome::Ingested);
+    };
+
+    if let Some(parent) = cfg.ingest_state_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create ingest-state parent dir {}", parent.display()))?;
+    }
+
+    let _lock = IngestStateLock::acquire(&cfg.ingest_state_path)?;
+    let state = load_ingest_state(&cfg.ingest_state_path, true)?;
+    let policy_sha = ingest_policy_sha256(wiki_root)?;
+
+    let ingest_path = resolve_ingest_source(source_file)?;
+    let wiki_root_str = wiki_root.to_str().ok_or_else(|| {
+        anyhow::anyhow!(
+            "{CODE_INGEST_STATE_UTF8_PATH}: wiki root is not valid UTF-8: {}",
+            wiki_root.display()
+        )
+    })?;
+    let source_key = source_key_for(wiki_root, &ingest_path)?;
+    let content_sha = sha256_hex_file(&ingest_path)?;
+
+    let identity = IngestIdentity {
+        wiki_root: wiki_root_str.to_string(),
+        source_key: source_key.clone(),
+        content_sha256: content_sha.clone(),
+        ingest_policy_sha256: policy_sha.clone(),
+        agent: agent.to_string(),
+        model: model.map(|s| s.to_string()),
+    };
+
+    if !cfg.force && state.contains_key(&identity) {
+        eprintln!(
+            "SKIP: {} (already ingested under same policy/content/agent/model)",
+            source_key
+        );
+        return Ok(IngestFileOutcome::Skipped);
+    }
+
+    let prompt = expand_ingest_prompt(wiki_root, &ingest_path, prompt_path)?;
+    run_aikit(wiki_root, &prompt, agent, model, stream)?;
+
+    let completed_at = OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
+    let record = IngestStateRecordV1 {
+        schema_version: 1,
+        status: IngestStatus::Success,
+        wiki_root: wiki_root_str.to_string(),
+        source_key,
+        content_sha256: content_sha,
+        ingest_policy_sha256: policy_sha,
+        agent: agent.to_string(),
+        model: model.map(|s| s.to_string()),
+        completed_at,
+        agwiki_version: env!("CARGO_PKG_VERSION").to_string(),
+    };
+    append_ingest_success(&cfg.ingest_state_path, &record)?;
+    Ok(IngestFileOutcome::Ingested)
+}
+
+/// Folder ingest summary with resume support.
+#[derive(Debug)]
+pub struct FolderIngestResultV2 {
+    pub total: usize,
+    pub succeeded: usize,
+    pub skipped: usize,
+    pub failures: Vec<(PathBuf, String)>,
+}
+
+/// Run folder ingest with resume support and return summary including skipped count.
+///
+/// Existing [`run_folder_ingest`] remains available and preserves current behavior.
+///
+/// Example:
+/// ```no_run
+/// # use std::path::Path;
+/// # use agwiki::ingest::{run_folder_ingest_with_resume, IngestResumeConfig};
+/// let cfg = IngestResumeConfig{ resume: true, force: false, ingest_state_path: Path::new(".agwiki/ingest-state.jsonl").to_path_buf() };
+/// let _ = run_folder_ingest_with_resume(Path::new("."), Path::new("raw"), Path::new("ingest.md"), "codex", None, false, 0, Some(&cfg))?;
+/// # Ok::<(), anyhow::Error>(())
+/// ```
+#[allow(clippy::too_many_arguments)]
+pub fn run_folder_ingest_with_resume(
+    wiki_root: &Path,
+    folder: &Path,
+    prompt_path: &Path,
+    agent: &str,
+    model: Option<&str>,
+    stream: bool,
+    max_files: usize,
+    resume: Option<&IngestResumeConfig>,
+) -> Result<FolderIngestResultV2> {
+    let Some(cfg) = resume.filter(|c| c.resume) else {
+        let r = run_folder_ingest(
+            wiki_root,
+            folder,
+            prompt_path,
+            agent,
+            model,
+            stream,
+            max_files,
+        )?;
+        return Ok(FolderIngestResultV2 {
+            total: r.total,
+            succeeded: r.succeeded,
+            skipped: 0,
+            failures: r.failures,
+        });
+    };
+
+    if let Some(parent) = cfg.ingest_state_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create ingest-state parent dir {}", parent.display()))?;
+    }
+
+    let _lock = IngestStateLock::acquire(&cfg.ingest_state_path)?;
+    let mut state = load_ingest_state(&cfg.ingest_state_path, true)?;
+    let policy_sha = ingest_policy_sha256(wiki_root)?;
+
+    let files = discover_md_files(folder)?;
+    let total = files.len();
+
+    if max_files > 0 && total > max_files {
+        bail!(
+            "found {} markdown file(s) under {}; exceeds --max-files cap of {}. \
+             Pass --max-files {} (or higher) to proceed.",
+            total,
+            folder.display(),
+            max_files,
+            total
+        );
+    }
+
+    let wiki_root_str = wiki_root.to_str().ok_or_else(|| {
+        anyhow::anyhow!(
+            "{CODE_INGEST_STATE_UTF8_PATH}: wiki root is not valid UTF-8: {}",
+            wiki_root.display()
+        )
+    })?;
+
+    let mut failures: Vec<(PathBuf, String)> = Vec::new();
+    let mut skipped = 0usize;
+
+    for file in &files {
+        let ingest_path = match resolve_ingest_source(file) {
+            Ok(p) => p,
+            Err(e) => {
+                failures.push((file.clone(), e.to_string()));
+                continue;
+            }
+        };
+
+        let source_key = match source_key_for(wiki_root, &ingest_path) {
+            Ok(k) => k,
+            Err(e) => {
+                failures.push((file.clone(), e.to_string()));
+                continue;
+            }
+        };
+
+        let content_sha = match sha256_hex_file(&ingest_path) {
+            Ok(s) => s,
+            Err(e) => {
+                failures.push((file.clone(), e.to_string()));
+                continue;
+            }
+        };
+
+        let identity = IngestIdentity {
+            wiki_root: wiki_root_str.to_string(),
+            source_key: source_key.clone(),
+            content_sha256: content_sha.clone(),
+            ingest_policy_sha256: policy_sha.clone(),
+            agent: agent.to_string(),
+            model: model.map(|s| s.to_string()),
+        };
+
+        if !cfg.force && state.contains_key(&identity) {
+            skipped += 1;
+            eprintln!(
+                "SKIP: {} (already ingested under same policy/content/agent/model)",
+                source_key
+            );
+            continue;
+        }
+
+        let prompt = match expand_ingest_prompt(wiki_root, &ingest_path, prompt_path) {
+            Ok(p) => p,
+            Err(e) => {
+                failures.push((file.clone(), e.to_string()));
+                continue;
+            }
+        };
+
+        if let Err(e) = run_aikit(wiki_root, &prompt, agent, model, stream) {
+            failures.push((file.clone(), e.to_string()));
+            continue;
+        }
+
+        let completed_at = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
+        let record = IngestStateRecordV1 {
+            schema_version: 1,
+            status: IngestStatus::Success,
+            wiki_root: wiki_root_str.to_string(),
+            source_key,
+            content_sha256: content_sha,
+            ingest_policy_sha256: policy_sha.clone(),
+            agent: agent.to_string(),
+            model: model.map(|s| s.to_string()),
+            completed_at,
+            agwiki_version: env!("CARGO_PKG_VERSION").to_string(),
+        };
+
+        if let Err(e) = append_ingest_success(&cfg.ingest_state_path, &record) {
+            failures.push((file.clone(), e.to_string()));
+            continue;
+        }
+        state.insert(identity, record);
+    }
+
+    let succeeded = total - failures.len() - skipped;
+    Ok(FolderIngestResultV2 {
+        total,
+        succeeded,
+        skipped,
+        failures,
+    })
+}
 
 /// Canonicalize `file`, ensure it exists and contains valid text content.
 pub fn resolve_ingest_source(file: &Path) -> Result<PathBuf> {
