@@ -33,7 +33,7 @@ sha2 = "0.10"
 ulid = "1.1"
 time = { version = "0.3", features = ["formatting"] }
 tokio = { version = "1.37", features = ["macros", "net", "rt", "rt-multi-thread", "signal"] }
-toml = "0.8"
+toml = "1.1"
 tower = "0.5"
 tower-http = { version = "0.5", features = ["trace"] }
 webbrowser = "1.0"
