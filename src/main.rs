@@ -275,6 +275,35 @@ fn resolve_root(opt: Option<PathBuf>) -> Result<PathBuf> {
         .unwrap_or_else(|| std::env::current_dir().context("current directory"))
 }
 
+fn resolve_ingest_state_path(wiki_root: &PathBuf, user: Option<PathBuf>) -> Result<PathBuf> {
+    let Some(p) = user else {
+        return Ok(wiki_root.join(".agwiki/ingest-state.jsonl"));
+    };
+    if p.is_absolute() {
+        return Ok(p);
+    }
+
+    let mut out = wiki_root.clone();
+    for c in p.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(part) => out.push(part),
+            std::path::Component::ParentDir => {
+                if out == *wiki_root {
+                    anyhow::bail!(
+                        "--ingest-state path escapes <wiki-root>; pass an absolute path to write outside the wiki root"
+                    );
+                }
+                out.pop();
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                anyhow::bail!("--ingest-state must be an absolute path or a relative path")
+            }
+        }
+    }
+    Ok(out)
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -290,11 +319,7 @@ fn main() -> Result<()> {
             let model = a.model.as_deref().map(str::trim).filter(|s| !s.is_empty());
 
             let resume_cfg = if a.resume {
-                let state_path = a
-                    .ingest_state
-                    .clone()
-                    .map(|p| if p.is_absolute() { p } else { root.join(p) })
-                    .unwrap_or_else(|| root.join(".agwiki/ingest-state.jsonl"));
+                let state_path = resolve_ingest_state_path(&root, a.ingest_state.clone())?;
                 Some(IngestResumeConfig {
                     resume: true,
                     force: a.force,

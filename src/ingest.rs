@@ -29,6 +29,15 @@ const CODE_INGEST_STATE_UTF8_PATH: &str = "AGWIKI_INGEST_STATE_UTF8_PATH";
 /// ```json
 /// {"schema_version":1,"status":"success","wiki_root":"/abs/wiki","source_key":"raw/note.md","content_sha256":"<64-hex>","ingest_policy_sha256":"<64-hex>","agent":"codex","model":null,"completed_at":"2026-04-25T23:10:00Z","agwiki_version":"0.2.0"}
 /// ```
+///
+/// Example (parse a JSONL line):
+/// ```no_run
+/// # use agwiki::ingest::IngestStateRecordV1;
+/// let line = r#"{"schema_version":1,"status":"success","wiki_root":"/abs/wiki","source_key":"raw/note.md","content_sha256":"0","ingest_policy_sha256":"1","agent":"codex","model":null,"completed_at":"2026-04-25T23:10:00Z","agwiki_version":"0.2.0"}"#;
+/// let rec: IngestStateRecordV1 = serde_json::from_str(line)?;
+/// assert_eq!(rec.schema_version, 1);
+/// # Ok::<(), anyhow::Error>(())
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IngestStateRecordV1 {
     /// Schema version (MUST be `1`).
@@ -54,6 +63,14 @@ pub struct IngestStateRecordV1 {
 }
 
 /// Ledger record status.
+///
+/// Example:
+/// ```no_run
+/// # use agwiki::ingest::IngestStatus;
+/// let s = serde_json::to_string(&IngestStatus::Success)?;
+/// assert_eq!(s, "\"success\"");
+/// # Ok::<(), anyhow::Error>(())
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum IngestStatus {
@@ -62,6 +79,23 @@ pub enum IngestStatus {
 }
 
 /// Identity key used to decide whether a prior success record can be reused.
+///
+/// A prior record is reusable only when all identity fields match and the record
+/// status is `success`.
+///
+/// Example:
+/// ```no_run
+/// # use agwiki::ingest::IngestIdentity;
+/// let id = IngestIdentity {
+///   wiki_root: "/abs/wiki".to_string(),
+///   source_key: "raw/note.md".to_string(),
+///   content_sha256: "0".repeat(64),
+///   ingest_policy_sha256: "1".repeat(64),
+///   agent: "codex".to_string(),
+///   model: None,
+/// };
+/// assert_eq!(id.source_key, "raw/note.md");
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IngestIdentity {
     pub wiki_root: String,
@@ -73,6 +107,22 @@ pub struct IngestIdentity {
 }
 
 /// Configuration for resume mode.
+///
+/// When `resume` is enabled, ingests consult an append-only JSONL ledger and may
+/// skip sources with a matching prior `success` identity. When `force` is set,
+/// sources are never skipped (but successes are still appended).
+///
+/// Example:
+/// ```no_run
+/// # use std::path::Path;
+/// # use agwiki::ingest::IngestResumeConfig;
+/// let cfg = IngestResumeConfig {
+///   resume: true,
+///   force: false,
+///   ingest_state_path: Path::new(".agwiki/ingest-state.jsonl").to_path_buf(),
+/// };
+/// assert!(cfg.resume);
+/// ```
 #[derive(Debug, Clone)]
 pub struct IngestResumeConfig {
     /// Enable resume ledger behavior.
@@ -93,8 +143,12 @@ impl IngestStateLock {
     fn acquire(ingest_state_path: &Path) -> Result<Self> {
         let lock_path = lock_path_for(ingest_state_path);
         if let Some(parent) = lock_path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create lock parent dir {}", parent.display()))?;
+            std::fs::create_dir_all(parent).map_err(|e| {
+                anyhow::anyhow!(
+                    "{CODE_INGEST_STATE_LOCKED}: failed to create ingest-state lock parent dir {}: {e}",
+                    parent.display()
+                )
+            })?;
         }
         match OpenOptions::new()
             .write(true)
@@ -357,6 +411,16 @@ pub fn append_ingest_success(path: &Path, record: &IngestStateRecordV1) -> Resul
 }
 
 /// Outcome of a resume-aware single-file ingest.
+///
+/// Example:
+/// ```no_run
+/// # use agwiki::ingest::IngestFileOutcome;
+/// let outcome = IngestFileOutcome::Skipped;
+/// match outcome {
+///   IngestFileOutcome::Ingested => {}
+///   IngestFileOutcome::Skipped => {}
+/// }
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IngestFileOutcome {
     /// The file was ingested (agent executed).
@@ -451,6 +515,13 @@ pub fn run_ingest_file_with_resume(
 }
 
 /// Folder ingest summary with resume support.
+///
+/// Example:
+/// ```no_run
+/// # use agwiki::ingest::FolderIngestResultV2;
+/// let r = FolderIngestResultV2 { total: 2, succeeded: 1, skipped: 1, failures: vec![] };
+/// assert_eq!(r.skipped, 1);
+/// ```
 #[derive(Debug)]
 pub struct FolderIngestResultV2 {
     pub total: usize,
