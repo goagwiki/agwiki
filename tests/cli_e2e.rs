@@ -237,14 +237,16 @@ mod unix_tests {
 
     fn make_stub_agent(stub_dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
-        let stub_path = stub_dir.join("codex");
-        fs::write(
-            &stub_path,
-            "#!/bin/sh\n# Test stub agent for agwiki CLI e2e tests.\n# If AGWIKI_STUB_HITS is set, append one line per invocation.\nif [ -n \"${AGWIKI_STUB_HITS:-}\" ]; then\n  echo hit >> \"$AGWIKI_STUB_HITS\"\nfi\nwhile IFS= read -r line; do :; done\nexit 0\n",
-        )?;
-        let mut perms = fs::metadata(&stub_path)?.permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&stub_path, perms)?;
+        for name in ["codex", "claude"] {
+            let stub_path = stub_dir.join(name);
+            fs::write(
+                &stub_path,
+                "#!/bin/sh\n# Test stub agent for agwiki CLI e2e tests.\n# If AGWIKI_STUB_HITS is set, append one line per invocation.\nif [ -n \"${AGWIKI_STUB_HITS:-}\" ]; then\n  echo hit >> \"$AGWIKI_STUB_HITS\"\nfi\nwhile IFS= read -r line; do :; done\nexit 0\n",
+            )?;
+            let mut perms = fs::metadata(&stub_path)?.permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&stub_path, perms)?;
+        }
         Ok(())
     }
 
@@ -252,6 +254,7 @@ mod unix_tests {
         root: &std::path::Path,
         stub_dir: &std::path::Path,
         source_file: &std::path::Path,
+        agent: &str,
         extra_args: &[&str],
         envs: &[(&str, &std::path::Path)],
         original_path: &str,
@@ -263,7 +266,7 @@ mod unix_tests {
             .arg("--wiki-root")
             .arg(root)
             .arg("-a")
-            .arg("codex");
+            .arg(agent);
         for a in extra_args {
             cmd.arg(a);
         }
@@ -361,6 +364,7 @@ mod unix_tests {
             root,
             stub_dir.path(),
             &source_file,
+            "codex",
             &[],
             &[],
             &original_path,
@@ -404,6 +408,7 @@ mod unix_tests {
             root,
             stub_dir.path(),
             &source_file,
+            "codex",
             &[],
             &[],
             &original_path,
@@ -447,6 +452,7 @@ mod unix_tests {
             root,
             stub_dir.path(),
             &source_file,
+            "codex",
             &[],
             &[],
             &original_path,
@@ -491,6 +497,7 @@ mod unix_tests {
             root,
             stub_dir.path(),
             &source_file,
+            "codex",
             &[],
             &[],
             &original_path,
@@ -670,6 +677,7 @@ mod unix_tests {
             root,
             stub_dir.path(),
             &source_file,
+            "codex",
             &["--resume"],
             &[("AGWIKI_STUB_HITS", &hits)],
             &original_path,
@@ -681,6 +689,7 @@ mod unix_tests {
             root,
             stub_dir.path(),
             &source_file,
+            "codex",
             &["--resume"],
             &[("AGWIKI_STUB_HITS", &hits)],
             &original_path,
@@ -724,6 +733,7 @@ mod unix_tests {
             root,
             stub_dir.path(),
             &source_file,
+            "codex",
             &["--resume"],
             &[("AGWIKI_STUB_HITS", &hits)],
             &original_path,
@@ -736,6 +746,7 @@ mod unix_tests {
             root,
             stub_dir.path(),
             &source_file,
+            "codex",
             &["--resume"],
             &[("AGWIKI_STUB_HITS", &hits)],
             &original_path,
@@ -767,6 +778,7 @@ mod unix_tests {
             root,
             stub_dir.path(),
             &source_file,
+            "codex",
             &["--resume"],
             &[("AGWIKI_STUB_HITS", &hits)],
             &original_path,
@@ -782,6 +794,7 @@ mod unix_tests {
             root,
             stub_dir.path(),
             &source_file,
+            "codex",
             &["--resume"],
             &[("AGWIKI_STUB_HITS", &hits)],
             &original_path,
@@ -813,6 +826,7 @@ mod unix_tests {
             root,
             stub_dir.path(),
             &source_file,
+            "codex",
             &["--resume"],
             &[("AGWIKI_STUB_HITS", &hits)],
             &original_path,
@@ -824,12 +838,141 @@ mod unix_tests {
             root,
             stub_dir.path(),
             &source_file,
+            "codex",
             &["--resume", "--force"],
             &[("AGWIKI_STUB_HITS", &hits)],
             &original_path,
         );
         assert!(second.status.success());
         assert_eq!(read_hits(&hits), 2, "expected --force to re-ingest");
+        Ok(())
+    }
+
+    #[test]
+    fn test_ingest_resume_agent_change_reingests() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = PATH_MUTEX.lock().unwrap();
+
+        let stub_dir = tempdir()?;
+        make_stub_agent(stub_dir.path())?;
+
+        let wiki_tmp = tempdir()?;
+        let root = wiki_tmp.path();
+        setup_wiki(root)?;
+
+        let source_file = root.join("raw/note.md");
+        fs::create_dir_all(source_file.parent().unwrap())?;
+        fs::write(&source_file, "# Note\n")?;
+
+        let hits = root.join("hits.txt");
+        let original_path = std::env::var("PATH").unwrap_or_default();
+
+        let first = run_ingest_with_file(
+            root,
+            stub_dir.path(),
+            &source_file,
+            "codex",
+            &["--resume"],
+            &[("AGWIKI_STUB_HITS", &hits)],
+            &original_path,
+        );
+        assert!(first.status.success());
+        assert_eq!(read_hits(&hits), 1);
+
+        let second = run_ingest_with_file(
+            root,
+            stub_dir.path(),
+            &source_file,
+            "claude",
+            &["--resume"],
+            &[("AGWIKI_STUB_HITS", &hits)],
+            &original_path,
+        );
+        assert!(second.status.success());
+        assert_eq!(read_hits(&hits), 2, "expected re-ingest on agent change");
+        Ok(())
+    }
+
+    #[test]
+    fn test_ingest_resume_model_change_reingests() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = PATH_MUTEX.lock().unwrap();
+
+        let stub_dir = tempdir()?;
+        make_stub_agent(stub_dir.path())?;
+
+        let wiki_tmp = tempdir()?;
+        let root = wiki_tmp.path();
+        setup_wiki(root)?;
+
+        let source_file = root.join("raw/note.md");
+        fs::create_dir_all(source_file.parent().unwrap())?;
+        fs::write(&source_file, "# Note\n")?;
+
+        let hits = root.join("hits.txt");
+        let original_path = std::env::var("PATH").unwrap_or_default();
+
+        let first = run_ingest_with_file(
+            root,
+            stub_dir.path(),
+            &source_file,
+            "codex",
+            &["--resume", "-m", "MODEL_A"],
+            &[("AGWIKI_STUB_HITS", &hits)],
+            &original_path,
+        );
+        assert!(first.status.success());
+        assert_eq!(read_hits(&hits), 1);
+
+        let second = run_ingest_with_file(
+            root,
+            stub_dir.path(),
+            &source_file,
+            "codex",
+            &["--resume", "-m", "MODEL_B"],
+            &[("AGWIKI_STUB_HITS", &hits)],
+            &original_path,
+        );
+        assert!(second.status.success());
+        assert_eq!(read_hits(&hits), 2, "expected re-ingest on model change");
+        Ok(())
+    }
+
+    #[test]
+    fn test_ingest_resume_explicit_ingest_state_relative_path(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = PATH_MUTEX.lock().unwrap();
+
+        let stub_dir = tempdir()?;
+        make_stub_agent(stub_dir.path())?;
+
+        let wiki_tmp = tempdir()?;
+        let root = wiki_tmp.path();
+        setup_wiki(root)?;
+
+        let source_file = root.join("raw/note.md");
+        fs::create_dir_all(source_file.parent().unwrap())?;
+        fs::write(&source_file, "# Note\n")?;
+
+        let hits = root.join("hits.txt");
+        let original_path = std::env::var("PATH").unwrap_or_default();
+
+        let state_rel = ".agwiki/custom-ingest-state.jsonl";
+        let out = run_ingest_with_file(
+            root,
+            stub_dir.path(),
+            &source_file,
+            "codex",
+            &["--resume", "--ingest-state", state_rel],
+            &[("AGWIKI_STUB_HITS", &hits)],
+            &original_path,
+        );
+        assert!(out.status.success());
+        assert_eq!(read_hits(&hits), 1);
+
+        let expected = root.join(state_rel);
+        assert!(
+            expected.is_file(),
+            "expected --ingest-state relative path to resolve under wiki root: {expected:?}"
+        );
         Ok(())
     }
 
@@ -931,6 +1074,7 @@ mod unix_tests {
             root,
             stub_dir.path(),
             &source_file,
+            "codex",
             &["--resume"],
             &[("AGWIKI_STUB_HITS", &hits)],
             &original_path,
@@ -978,6 +1122,7 @@ mod unix_tests {
             root,
             stub_dir.path(),
             &source_file,
+            "codex",
             &["--resume"],
             &[("AGWIKI_STUB_HITS", &hits)],
             &original_path,

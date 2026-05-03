@@ -33,8 +33,12 @@ const CODE_INGEST_STATE_UTF8_PATH: &str = "AGWIKI_INGEST_STATE_UTF8_PATH";
 /// Example (parse a JSONL line):
 /// ```no_run
 /// # use agwiki::ingest::IngestStateRecordV1;
-/// let line = r#"{"schema_version":1,"status":"success","wiki_root":"/abs/wiki","source_key":"raw/note.md","content_sha256":"0","ingest_policy_sha256":"1","agent":"codex","model":null,"completed_at":"2026-04-25T23:10:00Z","agwiki_version":"0.2.0"}"#;
-/// let rec: IngestStateRecordV1 = serde_json::from_str(line)?;
+/// let line = format!(
+///   r#"{{"schema_version":1,"status":"success","wiki_root":"/abs/wiki","source_key":"raw/note.md","content_sha256":"{}","ingest_policy_sha256":"{}","agent":"codex","model":null,"completed_at":"2026-04-25T23:10:00Z","agwiki_version":"0.2.0"}}"#,
+///   "0".repeat(64),
+///   "1".repeat(64),
+/// );
+/// let rec: IngestStateRecordV1 = serde_json::from_str(&line)?;
 /// assert_eq!(rec.schema_version, 1);
 /// # Ok::<(), anyhow::Error>(())
 /// ```
@@ -335,12 +339,27 @@ pub fn ingest_policy_sha256(wiki_root: &Path) -> Result<String> {
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 pub fn source_key_for(wiki_root: &Path, canonical_source: &Path) -> Result<String> {
+    let canonical_source = canonical_source.canonicalize().with_context(|| {
+        format!(
+            "canonicalize ingest source for source_key: {}",
+            canonical_source.display()
+        )
+    })?;
+
     if canonical_source.starts_with(wiki_root) {
         let rel = canonical_source
             .strip_prefix(wiki_root)
             .expect("prefix checked");
         return path_to_utf8_slash(rel);
     }
+
+    if !canonical_source.is_absolute() {
+        return Err(anyhow::anyhow!(
+            "{CODE_INGEST_STATE_UTF8_PATH}: source path is not absolute after canonicalization: {}",
+            canonical_source.display()
+        ));
+    }
+
     canonical_source
         .to_str()
         .map(|s| s.to_string())
@@ -603,6 +622,7 @@ pub fn run_folder_ingest_with_resume(
 
     let mut failures: Vec<(PathBuf, String)> = Vec::new();
     let mut skipped = 0usize;
+    let mut succeeded = 0usize;
 
     for file in &files {
         let ingest_path = match resolve_ingest_source(file) {
@@ -681,9 +701,9 @@ pub fn run_folder_ingest_with_resume(
             continue;
         }
         state.insert(identity, record);
+        succeeded += 1;
     }
 
-    let succeeded = total - failures.len() - skipped;
     Ok(FolderIngestResultV2 {
         total,
         succeeded,
