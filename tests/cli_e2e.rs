@@ -36,7 +36,7 @@ fn test_validate_clean_wiki() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(root.join("wiki/index.md"), "# Index\n")?;
 
     let mut cmd = Command::cargo_bin("agwiki")?;
-    cmd.arg("validate").arg("--wiki-root").arg(root);
+    cmd.arg("check").arg("wiki").arg("--wiki-root").arg(root);
     cmd.assert().success();
     Ok(())
 }
@@ -50,7 +50,7 @@ fn test_validate_broken_links() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(root.join("wiki/broken.md"), "see [[nowhere]]\n")?;
 
     let mut cmd = Command::cargo_bin("agwiki")?;
-    cmd.arg("validate").arg("--wiki-root").arg(root);
+    cmd.arg("check").arg("wiki").arg("--wiki-root").arg(root);
     cmd.assert()
         .failure()
         .stdout(predicate::str::contains("broken"));
@@ -62,14 +62,15 @@ fn test_export_skill_dry_run() -> Result<(), Box<dyn std::error::Error>> {
     let tmp = tempdir()?;
     let root = tmp.path();
 
-    // Set up minimal wiki structure required by export-skill
+    // Set up minimal wiki structure required by export skill
     fs::create_dir_all(root.join("wiki"))?;
     fs::write(root.join("wiki/index.md"), "# Index\n")?;
     fs::create_dir_all(root.join("skill/references"))?;
     fs::write(root.join("skill/SKILL.md"), "# Skill\n")?;
 
     let mut cmd = Command::cargo_bin("agwiki")?;
-    cmd.arg("export-skill")
+    cmd.arg("export")
+        .arg("skill")
         .arg("--wiki-root")
         .arg(root)
         .arg("--dry-run");
