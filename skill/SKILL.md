@@ -1,6 +1,6 @@
 ---
 name: agwiki
-description: Operates the agwiki CLI for agent-driven markdown wikis — scaffold with init, ingest raw notes via aikit-sdk, validate wikilinks and orphans, and export-skill bundles aligned with agentskills.io. Use when the user mentions agwiki, agent wiki, wiki ingest, export-skill, agwiki.toml, ingest.md, wiki/index.md, skill/references, broken wikilinks, or orphan wiki pages.
+description: Operates the agwiki CLI for agent-driven markdown wikis — scaffold with init, ingest raw notes via aikit-sdk, check wikilinks and orphans, and export skill bundles aligned with agentskills.io. Use when the user mentions agwiki, agent wiki, wiki ingest, export skill, agwiki.toml, ingest.md, wiki/index.md, skill/references, broken wikilinks, or orphan wiki pages.
 compatibility: Requires agwiki ≥ 0.1.11 (GitHub Releases, Homebrew goagwiki/cli/agwiki, or Scoop goagwiki/scoop-bucket). Command ingest runs an aikit-sdk agent in-process; -a/--agent is required (no default). --folder batch mode added in 0.1.11.
 metadata:
   version: "1.1.0"
@@ -9,7 +9,7 @@ license: Apache-2.0
 
 # agwiki CLI (tools-agwiki)
 
-[Agent Wiki](https://github.com/goagwiki/agwiki) is a Rust CLI: **`init`** scaffolds a wiki repo, **`ingest`** runs an embedded agent against `ingest.md`, **`validate`** fails on broken links and orphans, **`export-skill`** mirrors `wiki/` into an Agent Skill layout, and **`serve`** starts a local browser UI. Format follows [Agent Skills](https://agentskills.io/).
+[Agent Wiki](https://github.com/goagwiki/agwiki) is a Rust CLI: **`init`** scaffolds a wiki repo, **`ingest`** runs an embedded agent against `ingest.md`, **`check wiki`** fails on broken links and orphans, **`export skill`** mirrors `wiki/` into an Agent Skill layout, and **`serve`** starts a local browser UI. Format follows [Agent Skills](https://agentskills.io/).
 
 This skill ships inside the agwiki repository under `skill/tools-agwiki/`. To hack the tool itself, use the repo root and `cargo build` / `cargo test`.
 
@@ -26,8 +26,8 @@ This skill ships inside the agwiki repository under `skill/tools-agwiki/`. To ha
 | **`agwiki init [DIR]`** | Create wiki root at `DIR` (default `.`). **Fails if `DIR` exists and is not empty.** |
 | **`agwiki ingest -a <AGENT> <FILE>`** | Ingest a **single** source file (any UTF-8 text, not just `.md`); **`-a` / `--agent` required**. Optional **`-C`**, **`-m`**, **`--stream`**. Conflicts with `--folder`. |
 | **`agwiki ingest -a <AGENT> --folder <DIR>`** | **Batch mode** (≥ 0.1.11): ingest all `*.md` files under `DIR` recursively. Optional **`--max-files`** (default `30`, `0` = unlimited). Conflicts with `<FILE>`. |
-| **`agwiki validate`** | Broken wikilinks, relative markdown links, orphan pages (entry pages like **`wiki/index.md`** skipped). Exits **1** if any problem. **`--format text`** (default) or **`json`**. Optional **`-C` / `--wiki-root`**. |
-| **`agwiki export-skill`** | For each **immediate subdirectory** of **`wiki/`**, copies `wiki/<name>/**/*.md` → **`skill/references/<name>/`**. Requires **`wiki/index.md`**. Updates **`SKILL.md`** inside **`<!-- agwiki:generated-index -->`** … **`<!-- /agwiki:generated-index -->`** markers. Optional **`-C`**, **`--skill-root`**, **`--skill-md`**, **`--dry-run`**, **`--prune`**. |
+| **`agwiki check wiki`** | Broken wikilinks, relative markdown links, orphan pages (entry pages like **`wiki/index.md`** skipped). Exits **1** if any problem. **`--format text`** (default) or **`json`**. Optional **`-C` / `--wiki-root`**. |
+| **`agwiki export skill`** | For each **immediate subdirectory** of **`wiki/`**, copies `wiki/<name>/**/*.md` → **`skill/references/<name>/`**. Requires **`wiki/index.md`**. Updates **`SKILL.md`** inside **`<!-- agwiki:generated-index -->`** … **`<!-- /agwiki:generated-index -->`** markers. Optional **`-C`**, **`--skill-root`**, **`--skill-md`**, **`--dry-run`**, **`--prune`**. |
 | **`agwiki serve`** | Local HTTP UI for the wiki. Optional **`-C`**, **`--port`** (default `8080`), **`--host`** (default `127.0.0.1`), **`--open`**. |
 
 Omitting **`-C` / `--wiki-root`**: cwd must be the wiki root (contain **`wiki/`**).
@@ -94,12 +94,12 @@ agwiki ingest --resume --ingest-state .agwiki/ingest-state.jsonl -a codex --fold
 
 **Batch behaviour:** Continues through all discovered files even if individual ones fail. Prints a summary to **stderr** (`Batch ingest: X total, Y succeeded, (skipped), Z failed.`) and lists each failure. Exits **1** if any file failed.
 
-### `agwiki validate`
+### `agwiki check wiki`
 
 ```
-agwiki validate
-agwiki validate -C /path/to/wiki
-agwiki validate --format json
+agwiki check wiki
+agwiki check wiki -C /path/to/wiki
+agwiki check wiki --format json
 ```
 
 | Flag | Description |
@@ -109,14 +109,14 @@ agwiki validate --format json
 
 Exits **1** if any broken link or orphan is found. Use in CI as the failing gate.
 
-### `agwiki export-skill`
+### `agwiki export skill`
 
 ```
-agwiki export-skill
-agwiki export-skill --prune
-agwiki export-skill -C /path/to/wiki --dry-run
-agwiki export-skill --skill-root ./my-skill
-agwiki export-skill --skill-md ./my-skill/SKILL.md
+agwiki export skill
+agwiki export skill --prune
+agwiki export skill -C /path/to/wiki --dry-run
+agwiki export skill --skill-root ./my-skill
+agwiki export skill --skill-md ./my-skill/SKILL.md
 ```
 
 | Flag | Description |
@@ -127,7 +127,7 @@ agwiki export-skill --skill-md ./my-skill/SKILL.md
 | `--dry-run` | Print planned copies/prunes and generated index; do not write files. |
 | `--prune` | Remove files under `skill/references/` when the source `.md` no longer exists in the wiki. |
 
-Exits **0** even when validation warnings appear on stderr — use `agwiki validate` in CI for a hard failure.
+Exits **0** even when validation warnings appear on stderr — use `agwiki check wiki` in CI for a hard failure.
 
 ### `agwiki serve`
 
@@ -148,7 +148,7 @@ agwiki serve -C /path/to/wiki --open
 
 ## Workflows
 
-**New wiki:** `agwiki init <dir>` → edit under **`wiki/`** → `agwiki validate` → optional `agwiki export-skill`.
+**New wiki:** `agwiki init <dir>` → edit under **`wiki/`** → `agwiki check wiki` → optional `agwiki export skill`.
 
 **Ingest a raw note:** Place or keep the source under **`raw/`** (agents must **not** edit **`raw/`**). Run `agwiki ingest -a <agent> ./raw/note.md` from a cwd where the path resolves. The agent follows rules in **`ingest.md`**: work only under **`wiki/`**, prefer updating existing pages, link related pages, keep **`wiki/index.md`** current, append to **`wiki/log.md`**, use **`wiki/sources/`** and `templates/source-page.md` per the embedded workflow. For the full rule text, read **`ingest.md`** in the wiki root (or upstream `prompts/ingest.md`).
 
@@ -156,15 +156,15 @@ agwiki serve -C /path/to/wiki --open
 
 **Resume ingest:** `agwiki ingest --resume -a codex ./raw/note.md` — appends a success record to `<wiki-root>/.agwiki/ingest-state.jsonl` and skips subsequent runs if the same identity matches (wiki root + source key + source hash + `ingest.md` hash + agent + model).
 
-**Publish a skill bundle:** Keep **`wiki/index.md`** wikilinks accurate so the generated index matches intent → `agwiki export-skill --dry-run` to preview → `agwiki export-skill` (add **`--prune`** when wiki pages were removed so stale `skill/references/**` files drop).
+**Publish a skill bundle:** Keep **`wiki/index.md`** wikilinks accurate so the generated index matches intent → `agwiki export skill --dry-run` to preview → `agwiki export skill` (add **`--prune`** when wiki pages were removed so stale `skill/references/**` files drop).
 
 **CI pipeline:**
 ```
-agwiki validate           # fails on broken links / orphans
-agwiki export-skill       # update skill bundle
+agwiki check wiki         # fails on broken links / orphans
+agwiki export skill       # update skill bundle
 ```
 
-## HTML comment markers (export-skill)
+## HTML comment markers (export skill)
 
 Use **exactly** this opening line:
 
@@ -174,11 +174,11 @@ and this closing line:
 
 `<!-- /agwiki:generated-index -->`
 
-**Pitfalls:** A start marker **without** a matching end (or an end **without** a start) makes **`export-skill`** error when merging the generated index. Only **top-level directories directly under `wiki/`** become **`skill/references/<dir>/`**; nested structure under each dir is preserved.
+**Pitfalls:** A start marker **without** a matching end (or an end **without** a start) makes **`export skill`** error when merging the generated index. Only **top-level directories directly under `wiki/`** become **`skill/references/<dir>/`**; nested structure under each dir is preserved.
 
 ## Validation JSON
 
-For machine-readable validate output, see [references/validate-json-schema.md](references/validate-json-schema.md). Summary: top-level **`wiki_root`**, **`problems`** array; each problem has **`kind`** (`broken_link` or `orphan`) and a **`message`**. Empty **`problems`** means pass.
+For machine-readable check output, see [references/validate-json-schema.md](references/validate-json-schema.md). Summary: top-level **`wiki_root`**, **`problems`** array; each problem has **`kind`** (`broken_link` or `orphan`) and a **`message`**. Empty **`problems`** means pass.
 
 ## Limitations
 

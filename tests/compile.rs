@@ -250,7 +250,8 @@ fn validate_sources_does_not_write() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     Command::cargo_bin("agwiki")?
-        .arg("validate-sources")
+        .arg("check")
+        .arg("sources")
         .arg("-C")
         .arg(&root)
         .assert()
@@ -283,7 +284,8 @@ fn export_html_smoke() -> Result<(), Box<dyn std::error::Error>> {
         .success();
 
     Command::cargo_bin("agwiki")?
-        .arg("export-html")
+        .arg("export")
+        .arg("html")
         .arg("-C")
         .arg(&root)
         .assert()

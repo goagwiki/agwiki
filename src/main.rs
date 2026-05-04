@@ -51,35 +51,65 @@ enum Commands {
         after_help = "Example:\n  agwiki compile\n  agwiki compile --dry-run\n  agwiki compile -C /path/to/wiki\n  `-C` / `--wiki-root` defaults to the current working directory when omitted."
     )]
     Compile(CompileArgs),
-    /// Validate ontology content sources without writing generated wiki files
+    /// Parent command for publish/export workflows.
     #[command(
-        after_help = "Example:\n  agwiki validate-sources\n  agwiki validate-sources -C /path/to/wiki\n  `-C` / `--wiki-root` defaults to the current working directory when omitted."
+        after_help = "Example:\n  agwiki export skill -C /path/to/wiki --dry-run\n  agwiki export html -C /path/to/wiki --out dist/html\n  Use `agwiki export <subcommand> --help` for flags and more examples."
     )]
-    ValidateSources(ValidateSourcesArgs),
-    /// Check broken wikilinks, relative markdown links, and orphan wiki pages
+    Export(ExportCommand),
+    /// Parent command for quality checks.
     #[command(
-        after_help = "Example:\n  agwiki validate\n  agwiki validate -C /path/to/wiki\n  agwiki validate --format json\n  Exits with status 1 if any broken link or orphan page is found.\n  `-C` / `--wiki-root` defaults to the current working directory when omitted."
+        after_help = "Example:\n  agwiki check sources -C /path/to/wiki\n  agwiki check wiki -C /path/to/wiki --format json\n  Use `agwiki check <subcommand> --help` for flags and more examples."
     )]
-    Validate(ValidateArgs),
-    /// Mirror `wiki/<top-level-dir>/` into the skill bundle and refresh the wiki index inside `SKILL.md` (agwiki HTML comment markers)
-    #[command(
-        long_about = "Copies markdown from each immediate subdirectory of wiki/ into skill/references/<name>/. \
-Reads wiki/index.md to build a link index. Updates SKILL.md by replacing the block between \
-<!-- agwiki:generated-index --> and <!-- /agwiki:generated-index -->, or appends that block if missing. \
-Runs wiki validation and prints warnings on stderr if there are broken links or orphans (export still succeeds).",
-        after_help = "Example:\n  agwiki export-skill\n  agwiki export-skill --prune\n  agwiki export-skill -C /path/to/wiki --dry-run\n  `-C` / `--wiki-root` defaults to the current working directory when omitted.\n  Use `agwiki validate` in CI for a non-zero exit on issues."
-    )]
-    ExportSkill(ExportArgs),
-    /// Export generated wiki markdown as a static HTML tree
-    #[command(
-        after_help = "Example:\n  agwiki export-html\n  agwiki export-html --out public\n  agwiki export-html -C /path/to/wiki --out dist/html\n  `-C` / `--wiki-root` defaults to the current working directory when omitted."
-    )]
-    ExportHtml(ExportHtmlArgs),
+    Check(CheckCommand),
     /// Start a local HTTP server to browse the wiki in a web UI
     #[command(
         after_help = "Example:\n  agwiki serve\n  agwiki serve --open\n  agwiki serve --port 8081\n  agwiki serve --host 0.0.0.0 --port 8080\n  agwiki serve -C /path/to/wiki --open\n  `-C` / `--wiki-root` defaults to the current working directory when omitted."
     )]
     Serve(ServeArgs),
+}
+
+#[derive(clap::Args)]
+struct ExportCommand {
+    #[command(subcommand)]
+    command: ExportCommands,
+}
+
+#[derive(Subcommand)]
+enum ExportCommands {
+    /// Mirror `wiki/<top-level-dir>/` into the skill bundle and refresh the wiki index inside `SKILL.md`.
+    #[command(
+        long_about = "Copies markdown from each immediate subdirectory of wiki/ into skill/references/<name>/. \
+Reads wiki/index.md to build a link index. Updates SKILL.md by replacing the block between \
+<!-- agwiki:generated-index --> and <!-- /agwiki:generated-index -->, or appends that block if missing. \
+Runs wiki validation and prints warnings on stderr if there are broken links or orphans (export still succeeds).",
+        after_help = "Example:\n  agwiki export skill\n  agwiki export skill --prune\n  agwiki export skill -C /path/to/wiki --dry-run\n  `-C` / `--wiki-root` defaults to the current working directory when omitted.\n  Use `agwiki check wiki` in CI for a non-zero exit on issues."
+    )]
+    Skill(ExportArgs),
+    /// Export generated wiki markdown as a static HTML tree.
+    #[command(
+        after_help = "Example:\n  agwiki export html\n  agwiki export html --out public\n  agwiki export html -C /path/to/wiki --out dist/html\n  `-C` / `--wiki-root` defaults to the current working directory when omitted."
+    )]
+    Html(ExportHtmlArgs),
+}
+
+#[derive(clap::Args)]
+struct CheckCommand {
+    #[command(subcommand)]
+    command: CheckCommands,
+}
+
+#[derive(Subcommand)]
+enum CheckCommands {
+    /// Validate ontology content sources without writing generated wiki files.
+    #[command(
+        after_help = "Example:\n  agwiki check sources\n  agwiki check sources -C /path/to/wiki\n  `-C` / `--wiki-root` defaults to the current working directory when omitted."
+    )]
+    Sources(ValidateSourcesArgs),
+    /// Check broken wikilinks, relative markdown links, and orphan wiki pages.
+    #[command(
+        after_help = "Example:\n  agwiki check wiki\n  agwiki check wiki -C /path/to/wiki\n  agwiki check wiki --format json\n  Exits with status 1 if any broken link or orphan page is found.\n  `-C` / `--wiki-root` defaults to the current working directory when omitted."
+    )]
+    Wiki(ValidateArgs),
 }
 
 #[derive(clap::Args)]
@@ -428,46 +458,50 @@ fn main() -> Result<()> {
                 std::process::exit(1);
             }
         }
-        Commands::ValidateSources(a) => {
-            let root = resolve_root(a.wiki.wiki_root)?;
-            let report = run_compile(CompileOptions {
-                wiki_root: root,
-                dry_run: true,
-            })?;
-            if !report.errors.is_empty() {
-                std::process::exit(1);
+        Commands::Export(a) => match a.command {
+            ExportCommands::Skill(a) => {
+                let root = resolve_wiki_root(a.wiki.wiki_root)?;
+                run_export(ExportOptions {
+                    wiki_root: &root,
+                    skill_root: a.skill_root.as_deref(),
+                    skill_md: a.skill_md.as_deref(),
+                    dry_run: a.dry_run,
+                    prune: a.prune,
+                })?;
             }
-        }
-        Commands::Validate(a) => {
-            let root = resolve_wiki_root(a.wiki.wiki_root)?;
-            let report = validate_wiki(&root)?;
-            match a.format {
-                ValidateFormat::Text => println!("{}", report.to_text()),
-                ValidateFormat::Json => println!("{}", report.to_json()?),
+            ExportCommands::Html(a) => {
+                let root = resolve_root(a.wiki.wiki_root)?;
+                let out_dir = if a.out.is_absolute() {
+                    a.out
+                } else {
+                    root.join(a.out)
+                };
+                run_export_html(&root, &out_dir)?;
             }
-            if !report.is_clean() {
-                std::process::exit(1);
+        },
+        Commands::Check(a) => match a.command {
+            CheckCommands::Sources(a) => {
+                let root = resolve_root(a.wiki.wiki_root)?;
+                let report = run_compile(CompileOptions {
+                    wiki_root: root,
+                    dry_run: true,
+                })?;
+                if !report.errors.is_empty() {
+                    std::process::exit(1);
+                }
             }
-        }
-        Commands::ExportSkill(a) => {
-            let root = resolve_wiki_root(a.wiki.wiki_root)?;
-            run_export(ExportOptions {
-                wiki_root: &root,
-                skill_root: a.skill_root.as_deref(),
-                skill_md: a.skill_md.as_deref(),
-                dry_run: a.dry_run,
-                prune: a.prune,
-            })?;
-        }
-        Commands::ExportHtml(a) => {
-            let root = resolve_root(a.wiki.wiki_root)?;
-            let out_dir = if a.out.is_absolute() {
-                a.out
-            } else {
-                root.join(a.out)
-            };
-            run_export_html(&root, &out_dir)?;
-        }
+            CheckCommands::Wiki(a) => {
+                let root = resolve_wiki_root(a.wiki.wiki_root)?;
+                let report = validate_wiki(&root)?;
+                match a.format {
+                    ValidateFormat::Text => println!("{}", report.to_text()),
+                    ValidateFormat::Json => println!("{}", report.to_json()?),
+                }
+                if !report.is_clean() {
+                    std::process::exit(1);
+                }
+            }
+        },
         Commands::Serve(a) => {
             let root = resolve_wiki_root(a.wiki.wiki_root)?;
             run_serve_blocking(ServerConfig {

@@ -1,4 +1,4 @@
-# `agwiki validate --format json`
+# `agwiki check wiki --format json`
 
 Stable shape (paths are strings; **`wiki_root`** is absolute when canonicalization succeeds):
 

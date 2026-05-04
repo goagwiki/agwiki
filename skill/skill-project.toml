@@ -1,6 +1,6 @@
 [metadata]
 version = "1.0.0"
 name = "agwiki"
-description = "Operates the agwiki CLI: init, ingest (aikit-sdk), validate, export-skill; Agent Skills layout and CI expectations."
+description = "Operates the agwiki CLI: init, ingest (aikit-sdk), check, export; Agent Skills layout and CI expectations."
 
 [dependencies]
