@@ -39,6 +39,9 @@ tower-http = { version = "0.5", features = ["trace"] }
 webbrowser = "1.0"
 
 
+[target.'cfg(target_env = "musl")'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
+
 [dev-dependencies]
 assert_cmd = "2.0"
 cli-framework = { git = "https://github.com/aroff/cli-framework", rev = "9af4fc7d66ef3a4850cd844ed1b61a62de75b357", features = ["testkit"] }
