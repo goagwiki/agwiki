@@ -543,7 +543,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 [[package]]
 name = "cli-framework"
 version = "0.3.0"
-source = "git+https://github.com/aroff/cli-framework?rev=7a7e786a0af4f8935c10eed7fb6ac05e6967f89a#7a7e786a0af4f8935c10eed7fb6ac05e6967f89a"
+source = "git+https://github.com/aroff/cli-framework?rev=c66d81bda5#c66d81bda5b6ff0aa1a96996dea81ea1b078b8ee"
 dependencies = [
  "ailoop-core",
  "anthropic-sdk",

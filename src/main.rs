@@ -5,7 +5,7 @@ use cli_framework::app::builder::AppBuilder;
 use cli_framework::app::context::AppContext;
 use cli_framework::command::{Command, CommandArgs};
 use cli_framework::spec::arg_spec::{ArgKind, ArgSpec, ArgValueType, Cardinality};
-use cli_framework::spec::command_tree::{CommandPath, CommandSpec, ExitCodeEntry, GroupMetadata};
+use cli_framework::spec::command_tree::{CommandSpec, ExitCodeEntry};
 use cli_framework::spec::value::ArgValue;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -430,12 +430,11 @@ fn serve_spec() -> CommandSpec {
     }
 }
 
-fn export_skill_spec() -> CommandSpec {
+fn export_spec() -> CommandSpec {
     CommandSpec {
-        summary: "Mirror wiki/ into the skill bundle and refresh the wiki index inside SKILL.md",
+        summary: "Publish/export workflows: export skill or export html",
         long_about: Some(
-            "Copies markdown from each immediate subdirectory of wiki/ into \
-             skill/references/<name>/. Updates SKILL.md by replacing the generated-index block.",
+            "Subcommands: skill — mirror wiki/ into the skill bundle; html — static HTML export.",
         ),
         examples: vec![
             "agwiki export skill",
@@ -451,6 +450,18 @@ fn export_skill_spec() -> CommandSpec {
             description: "Success",
         }],
         args: vec![
+            ArgSpec {
+                name: "subcommand",
+                kind: ArgKind::Positional,
+                short: None,
+                long: None,
+                value_type: ArgValueType::Enum(vec!["skill", "html"]),
+                cardinality: Cardinality::Required,
+                default: None,
+                conflicts_with: vec![],
+                requires: vec![],
+                help: "Export subcommand: skill or html",
+            },
             wiki_root_arg(),
             ArgSpec {
                 name: "skill-root",
@@ -500,26 +511,6 @@ fn export_skill_spec() -> CommandSpec {
                 requires: vec![],
                 help: "Remove files under skill/references/ when the source .md no longer exists",
             },
-        ],
-        notes: None,
-    }
-}
-
-fn export_html_spec() -> CommandSpec {
-    CommandSpec {
-        summary: "Export generated wiki markdown as a static HTML tree",
-        long_about: None,
-        examples: vec!["agwiki export html", "agwiki export html --out dist/html"],
-        aliases: vec![],
-        hidden: false,
-        deprecated: None,
-        env_vars: vec![],
-        exit_codes: vec![ExitCodeEntry {
-            code: 0,
-            description: "Success",
-        }],
-        args: vec![
-            wiki_root_arg(),
             ArgSpec {
                 name: "out",
                 kind: ArgKind::Option,
@@ -527,63 +518,46 @@ fn export_html_spec() -> CommandSpec {
                 long: None,
                 value_type: ArgValueType::String,
                 cardinality: Cardinality::Optional,
-                default: Some(ArgValue::Str("dist/html".into())),
+                default: None,
                 conflicts_with: vec![],
                 requires: vec![],
-                help: "Output directory for static HTML (default: dist/html)",
+                help: "Output directory for static HTML export (default: dist/html)",
             },
         ],
         notes: None,
     }
 }
 
-fn check_sources_spec() -> CommandSpec {
+fn check_spec() -> CommandSpec {
     CommandSpec {
-        summary: "Validate ontology content sources without writing generated wiki files",
-        long_about: None,
+        summary: "Quality checks: check wiki or check sources",
+        long_about: Some("Subcommands: wiki — check broken links and orphans; sources — validate ontology sources."),
         examples: vec![
+            "agwiki check wiki",
+            "agwiki check wiki --format json",
             "agwiki check sources",
-            "agwiki check sources -C /path/to/wiki",
         ],
         aliases: vec![],
         hidden: false,
         deprecated: None,
         env_vars: vec![],
         exit_codes: vec![
-            ExitCodeEntry {
-                code: 0,
-                description: "No errors",
-            },
-            ExitCodeEntry {
-                code: 1,
-                description: "Validation errors found",
-            },
-        ],
-        args: vec![wiki_root_arg()],
-        notes: None,
-    }
-}
-
-fn check_wiki_spec() -> CommandSpec {
-    CommandSpec {
-        summary: "Check broken wikilinks, relative markdown links, and orphan wiki pages",
-        long_about: Some("Exits with status 1 if any broken link or orphan page is found."),
-        examples: vec!["agwiki check wiki", "agwiki check wiki --format json"],
-        aliases: vec![],
-        hidden: false,
-        deprecated: None,
-        env_vars: vec![],
-        exit_codes: vec![
-            ExitCodeEntry {
-                code: 0,
-                description: "Wiki is clean",
-            },
-            ExitCodeEntry {
-                code: 1,
-                description: "Broken links or orphans found",
-            },
+            ExitCodeEntry { code: 0, description: "Clean" },
+            ExitCodeEntry { code: 1, description: "Issues found" },
         ],
         args: vec![
+            ArgSpec {
+                name: "subcommand",
+                kind: ArgKind::Positional,
+                short: None,
+                long: None,
+                value_type: ArgValueType::Enum(vec!["wiki", "sources"]),
+                cardinality: Cardinality::Required,
+                default: None,
+                conflicts_with: vec![],
+                requires: vec![],
+                help: "Check subcommand: wiki or sources",
+            },
             wiki_root_arg(),
             ArgSpec {
                 name: "format",
@@ -592,10 +566,10 @@ fn check_wiki_spec() -> CommandSpec {
                 long: None,
                 value_type: ArgValueType::Enum(vec!["text", "json"]),
                 cardinality: Cardinality::Optional,
-                default: Some(ArgValue::Enum("text".into())),
+                default: None,
                 conflicts_with: vec![],
                 requires: vec![],
-                help: "Output format: text (default) or json",
+                help: "Output format for wiki subcommand: text (default) or json",
             },
         ],
         notes: None,
@@ -614,9 +588,7 @@ fn make_init_command() -> Command {
         validator: None,
         execute: Arc::new(|_ctx, args| {
             Box::pin(async move {
-                let dir = args
-                    .positional
-                    .first()
+                let dir = opt(&args, "dir")
                     .map(PathBuf::from)
                     .unwrap_or_else(|| PathBuf::from("."));
                 run_init(&dir)?;
@@ -672,7 +644,7 @@ fn make_ingest_command() -> Command {
                     None
                 };
 
-                let file = args.positional.first().map(PathBuf::from);
+                let file = opt(&args, "file").map(PathBuf::from);
                 let folder = opt(&args, "folder").map(PathBuf::from);
                 let max_files = opt(&args, "max-files")
                     .and_then(|s| s.parse::<usize>().ok())
@@ -776,10 +748,7 @@ fn make_new_command() -> Command {
         execute: Arc::new(|_ctx, args| {
             Box::pin(async move {
                 let root = resolve_root(opt(&args, "wiki-root").map(PathBuf::from))?;
-                let kind = args
-                    .positional
-                    .first()
-                    .ok_or_else(|| anyhow::anyhow!("kind is required"))?;
+                let kind = opt(&args, "kind").ok_or_else(|| anyhow::anyhow!("kind is required"))?;
                 let title = opt(&args, "title");
                 let path = run_new(&root, kind, title)?;
                 println!("{}", path.display());
@@ -843,76 +812,48 @@ fn make_serve_command() -> Command {
     }
 }
 
-fn make_export_skill_command() -> Command {
+fn make_export_command() -> Command {
     Command {
-        id: "skill",
-        summary: "Mirror wiki/ into the skill bundle and refresh the wiki index inside SKILL.md",
-        syntax: Some("export skill [--dry-run] [--prune]"),
+        id: "export",
+        summary: "Publish/export workflows (export skill | export html)",
+        syntax: Some("export <skill|html> [options]"),
         category: Some("export"),
-        spec: Some(Arc::new(export_skill_spec())),
+        spec: Some(Arc::new(export_spec())),
         validator: None,
         execute: Arc::new(|_ctx, args| {
             Box::pin(async move {
-                let root = resolve_wiki_root(opt(&args, "wiki-root").map(PathBuf::from))?;
-                let skill_root_buf = opt(&args, "skill-root").map(PathBuf::from);
-                let skill_md_buf = opt(&args, "skill-md").map(PathBuf::from);
-                let dry_run = flag(&args, "dry-run");
-                let prune = flag(&args, "prune");
-                run_export(ExportOptions {
-                    wiki_root: &root,
-                    skill_root: skill_root_buf.as_deref(),
-                    skill_md: skill_md_buf.as_deref(),
-                    dry_run,
-                    prune,
-                })?;
-                Ok(())
-            })
-        }),
-    }
-}
-
-fn make_export_html_command() -> Command {
-    Command {
-        id: "html",
-        summary: "Export generated wiki markdown as a static HTML tree",
-        syntax: Some("export html [--out <dir>]"),
-        category: Some("export"),
-        spec: Some(Arc::new(export_html_spec())),
-        validator: None,
-        execute: Arc::new(|_ctx, args| {
-            Box::pin(async move {
-                let root = resolve_root(opt(&args, "wiki-root").map(PathBuf::from))?;
-                let out_str = opt(&args, "out").unwrap_or("dist/html");
-                let out = PathBuf::from(out_str);
-                let out_dir = if out.is_absolute() {
-                    out
-                } else {
-                    root.join(out)
-                };
-                run_export_html(&root, &out_dir)?;
-                Ok(())
-            })
-        }),
-    }
-}
-
-fn make_check_sources_command() -> Command {
-    Command {
-        id: "sources",
-        summary: "Validate ontology content sources without writing generated wiki files",
-        syntax: Some("check sources"),
-        category: Some("check"),
-        spec: Some(Arc::new(check_sources_spec())),
-        validator: None,
-        execute: Arc::new(|_ctx, args| {
-            Box::pin(async move {
-                let root = resolve_root(opt(&args, "wiki-root").map(PathBuf::from))?;
-                let report = run_compile(CompileOptions {
-                    wiki_root: root,
-                    dry_run: true,
-                })?;
-                if !report.errors.is_empty() {
-                    std::process::exit(1);
+                let subcmd = opt(&args, "subcommand")
+                    .ok_or_else(|| anyhow::anyhow!("subcommand required: skill, html"))?;
+                match subcmd {
+                    "skill" => {
+                        let root = resolve_wiki_root(opt(&args, "wiki-root").map(PathBuf::from))?;
+                        let skill_root_buf = opt(&args, "skill-root").map(PathBuf::from);
+                        let skill_md_buf = opt(&args, "skill-md").map(PathBuf::from);
+                        let dry_run = flag(&args, "dry-run");
+                        let prune = flag(&args, "prune");
+                        run_export(ExportOptions {
+                            wiki_root: &root,
+                            skill_root: skill_root_buf.as_deref(),
+                            skill_md: skill_md_buf.as_deref(),
+                            dry_run,
+                            prune,
+                        })?;
+                    }
+                    "html" => {
+                        let root = resolve_root(opt(&args, "wiki-root").map(PathBuf::from))?;
+                        let out_str = opt(&args, "out").unwrap_or("dist/html");
+                        let out = PathBuf::from(out_str);
+                        let out_dir = if out.is_absolute() {
+                            out
+                        } else {
+                            root.join(out)
+                        };
+                        run_export_html(&root, &out_dir)?;
+                    }
+                    _ => anyhow::bail!(
+                        "unknown subcommand '{}': expected 'skill' or 'html'",
+                        subcmd
+                    ),
                 }
                 Ok(())
             })
@@ -920,25 +861,45 @@ fn make_check_sources_command() -> Command {
     }
 }
 
-fn make_check_wiki_command() -> Command {
+fn make_check_command() -> Command {
     Command {
-        id: "wiki",
-        summary: "Check broken wikilinks, relative markdown links, and orphan wiki pages",
-        syntax: Some("check wiki [--format text|json]"),
+        id: "check",
+        summary: "Quality checks (check wiki | check sources)",
+        syntax: Some("check <wiki|sources> [options]"),
         category: Some("check"),
-        spec: Some(Arc::new(check_wiki_spec())),
+        spec: Some(Arc::new(check_spec())),
         validator: None,
         execute: Arc::new(|_ctx, args| {
             Box::pin(async move {
-                let root = resolve_wiki_root(opt(&args, "wiki-root").map(PathBuf::from))?;
-                let report = validate_wiki(&root)?;
-                let fmt = opt(&args, "format").unwrap_or("text");
-                match fmt {
-                    "json" => println!("{}", report.to_json()?),
-                    _ => println!("{}", report.to_text()),
-                }
-                if !report.is_clean() {
-                    std::process::exit(1);
+                let subcmd = opt(&args, "subcommand")
+                    .ok_or_else(|| anyhow::anyhow!("subcommand required: wiki, sources"))?;
+                match subcmd {
+                    "wiki" => {
+                        let root = resolve_wiki_root(opt(&args, "wiki-root").map(PathBuf::from))?;
+                        let report = validate_wiki(&root)?;
+                        let fmt = opt(&args, "format").unwrap_or("text");
+                        match fmt {
+                            "json" => println!("{}", report.to_json()?),
+                            _ => println!("{}", report.to_text()),
+                        }
+                        if !report.is_clean() {
+                            std::process::exit(1);
+                        }
+                    }
+                    "sources" => {
+                        let root = resolve_root(opt(&args, "wiki-root").map(PathBuf::from))?;
+                        let report = run_compile(CompileOptions {
+                            wiki_root: root,
+                            dry_run: true,
+                        })?;
+                        if !report.errors.is_empty() {
+                            std::process::exit(1);
+                        }
+                    }
+                    _ => anyhow::bail!(
+                        "unknown subcommand '{}': expected 'wiki' or 'sources'",
+                        subcmd
+                    ),
                 }
                 Ok(())
             })
@@ -957,36 +918,8 @@ async fn main() -> anyhow::Result<()> {
         .register_command(make_new_command())?
         .register_command(make_compile_command())?
         .register_command(make_serve_command())?
-        .register_group(
-            &CommandPath::new(&["export"])?,
-            GroupMetadata {
-                summary: "Parent command for publish/export workflows",
-                hidden: false,
-            },
-        )?
-        .register_command_at(
-            &CommandPath::new(&["export", "skill"])?,
-            make_export_skill_command(),
-        )?
-        .register_command_at(
-            &CommandPath::new(&["export", "html"])?,
-            make_export_html_command(),
-        )?
-        .register_group(
-            &CommandPath::new(&["check"])?,
-            GroupMetadata {
-                summary: "Parent command for quality checks",
-                hidden: false,
-            },
-        )?
-        .register_command_at(
-            &CommandPath::new(&["check", "sources"])?,
-            make_check_sources_command(),
-        )?
-        .register_command_at(
-            &CommandPath::new(&["check", "wiki"])?,
-            make_check_wiki_command(),
-        )?
+        .register_command(make_export_command())?
+        .register_command(make_check_command())?
         .build(AgwikiContext)?;
     app.run().await
 }

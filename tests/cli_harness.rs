@@ -79,9 +79,7 @@ mod harness_tests {
             validator: None,
             execute: Arc::new(|_ctx, args| {
                 Box::pin(async move {
-                    let dir = args
-                        .positional
-                        .first()
+                    let dir = opt(&args, "dir")
                         .map(PathBuf::from)
                         .unwrap_or_else(|| PathBuf::from("."));
                     agwiki::init::run_init(&dir)?;

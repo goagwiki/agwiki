@@ -20,7 +20,7 @@ path = "src/lib.rs"
 aikit-sdk = "0.1.50"
 anyhow = "1.0"
 axum = "0.7"
-cli-framework = { git = "https://github.com/aroff/cli-framework", rev = "7a7e786a0af4f8935c10eed7fb6ac05e6967f89a" }
+cli-framework = { git = "https://github.com/aroff/cli-framework", rev = "c66d81bda5" }
 http = "1.1"
 mime = "0.3"
 mime_guess = "2.0"
@@ -41,7 +41,7 @@ webbrowser = "1.0"
 
 [dev-dependencies]
 assert_cmd = "2.0"
-cli-framework = { git = "https://github.com/aroff/cli-framework", rev = "7a7e786a0af4f8935c10eed7fb6ac05e6967f89a", features = ["testkit"] }
+cli-framework = { git = "https://github.com/aroff/cli-framework", rev = "c66d81bda5", features = ["testkit"] }
 predicates = "3.0"
 serde_json = "1.0"
 tempfile = "3.10"
