@@ -36,7 +36,7 @@ tokio = { version = "1.37", features = ["macros", "net", "rt", "rt-multi-thread"
 toml = "0.8"
 tower = "0.5"
 tower-http = { version = "0.5", features = ["trace"] }
-webbrowser = "1.0"
+webbrowser = "1.2"
 
 
 [dev-dependencies]
