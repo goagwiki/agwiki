@@ -1343,12 +1343,7 @@ mod tests {
 
         static PATH_MUTEX: Mutex<()> = Mutex::new(());
 
-        #[test]
-        fn run_aikit_with_stub_agent_succeeds() {
-            let _guard = PATH_MUTEX.lock().unwrap();
-
-            let stub_dir = tempdir().unwrap();
-            // Write a stub script that exits 0 and prints nothing to stderr
+        fn make_stub_agent(stub_dir: &tempfile::TempDir) -> (String, String) {
             let stub_path = stub_dir.path().join("codex");
             fs::write(
                 &stub_path,
@@ -1359,30 +1354,61 @@ mod tests {
             let mut perms = fs::metadata(&stub_path).unwrap().permissions();
             perms.set_mode(0o755);
             fs::set_permissions(&stub_path, perms).unwrap();
-
             let original_path = std::env::var("PATH").unwrap_or_default();
-            std::env::set_var(
-                "PATH",
-                format!("{}:{}", stub_dir.path().display(), original_path),
-            );
+            let new_path = format!("{}:{}", stub_dir.path().display(), original_path);
+            (new_path, original_path)
+        }
 
-            let wiki_tmp = tempdir().unwrap();
-            let result = run_aikit(wiki_tmp.path(), "hello", "codex", None, false, false);
-
-            std::env::set_var("PATH", original_path);
-
-            // The stub exits 0, so this should succeed (or fail with a spawn/io error, not a "not runnable" error)
+        fn assert_not_not_runnable(result: Result<()>) {
             match result {
                 Ok(()) => {}
                 Err(e) => {
                     let msg = e.to_string();
-                    // Must NOT be a "not runnable" failure
                     assert!(
                         !msg.contains("not runnable"),
                         "unexpected not-runnable error: {msg}"
                     );
                 }
             }
+        }
+
+        #[test]
+        fn run_aikit_with_stub_agent_succeeds() {
+            let _guard = PATH_MUTEX.lock().unwrap();
+            let stub_dir = tempdir().unwrap();
+            let (new_path, original_path) = make_stub_agent(&stub_dir);
+            std::env::set_var("PATH", new_path);
+            let wiki_tmp = tempdir().unwrap();
+            // AC 8: neither --stream nor --progress → with_stream(false)
+            let result = run_aikit(wiki_tmp.path(), "hello", "codex", None, false, false);
+            std::env::set_var("PATH", original_path);
+            assert_not_not_runnable(result);
+        }
+
+        #[test]
+        fn run_aikit_with_progress_only_enables_stream() {
+            let _guard = PATH_MUTEX.lock().unwrap();
+            let stub_dir = tempdir().unwrap();
+            let (new_path, original_path) = make_stub_agent(&stub_dir);
+            std::env::set_var("PATH", new_path);
+            let wiki_tmp = tempdir().unwrap();
+            // AC 6: --progress set, --stream not set → with_stream(true) internally
+            let result = run_aikit(wiki_tmp.path(), "hello", "codex", None, false, true);
+            std::env::set_var("PATH", original_path);
+            assert_not_not_runnable(result);
+        }
+
+        #[test]
+        fn run_aikit_with_stream_and_progress_enables_stream() {
+            let _guard = PATH_MUTEX.lock().unwrap();
+            let stub_dir = tempdir().unwrap();
+            let (new_path, original_path) = make_stub_agent(&stub_dir);
+            std::env::set_var("PATH", new_path);
+            let wiki_tmp = tempdir().unwrap();
+            // AC 7: both --stream and --progress set → with_stream(true)
+            let result = run_aikit(wiki_tmp.path(), "hello", "codex", None, true, true);
+            std::env::set_var("PATH", original_path);
+            assert_not_not_runnable(result);
         }
     }
 }
