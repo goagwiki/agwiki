@@ -12,7 +12,10 @@ use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use crate::toolkit::expand_ingest_prompt;
-use aikit_sdk::{is_runnable, run_agent_events, runnable_agents, RunOptions};
+use aikit_sdk::{
+    is_runnable, run_agent_events, runnable_agents, AgentEvent, ProgressViewConfig, RunOptions,
+    RunProgress,
+};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
@@ -458,9 +461,10 @@ pub enum IngestFileOutcome {
 /// # use std::path::Path;
 /// # use agwiki::ingest::{run_ingest_file_with_resume, IngestResumeConfig};
 /// let cfg = IngestResumeConfig{ resume: true, force: false, ingest_state_path: Path::new(".agwiki/ingest-state.jsonl").to_path_buf() };
-/// let _ = run_ingest_file_with_resume(Path::new("."), Path::new("raw/note.md"), Path::new("ingest.md"), "codex", None, false, Some(&cfg))?;
+/// let _ = run_ingest_file_with_resume(Path::new("."), Path::new("raw/note.md"), Path::new("ingest.md"), "codex", None, false, false, Some(&cfg))?;
 /// # Ok::<(), anyhow::Error>(())
 /// ```
+#[allow(clippy::too_many_arguments)]
 pub fn run_ingest_file_with_resume(
     wiki_root: &Path,
     source_file: &Path,
@@ -468,10 +472,19 @@ pub fn run_ingest_file_with_resume(
     agent: &str,
     model: Option<&str>,
     stream: bool,
+    progress: bool,
     resume: Option<&IngestResumeConfig>,
 ) -> Result<IngestFileOutcome> {
     let Some(cfg) = resume.filter(|c| c.resume) else {
-        run_ingest_for_path(wiki_root, source_file, prompt_path, agent, model, stream)?;
+        run_ingest_for_path(
+            wiki_root,
+            source_file,
+            prompt_path,
+            agent,
+            model,
+            stream,
+            progress,
+        )?;
         return Ok(IngestFileOutcome::Ingested);
     };
 
@@ -512,7 +525,7 @@ pub fn run_ingest_file_with_resume(
     }
 
     let prompt = expand_ingest_prompt(wiki_root, &ingest_path, prompt_path)?;
-    run_aikit(wiki_root, &prompt, agent, model, stream)?;
+    run_aikit(wiki_root, &prompt, agent, model, stream, progress)?;
 
     let completed_at = OffsetDateTime::now_utc()
         .format(&Rfc3339)
@@ -558,7 +571,7 @@ pub struct FolderIngestResultV2 {
 /// # use std::path::Path;
 /// # use agwiki::ingest::{run_folder_ingest_with_resume, IngestResumeConfig};
 /// let cfg = IngestResumeConfig{ resume: true, force: false, ingest_state_path: Path::new(".agwiki/ingest-state.jsonl").to_path_buf() };
-/// let _ = run_folder_ingest_with_resume(Path::new("."), Path::new("raw"), Path::new("ingest.md"), "codex", None, false, 0, Some(&cfg))?;
+/// let _ = run_folder_ingest_with_resume(Path::new("."), Path::new("raw"), Path::new("ingest.md"), "codex", None, false, false, 0, Some(&cfg))?;
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 #[allow(clippy::too_many_arguments)]
@@ -569,6 +582,7 @@ pub fn run_folder_ingest_with_resume(
     agent: &str,
     model: Option<&str>,
     stream: bool,
+    progress: bool,
     max_files: usize,
     resume: Option<&IngestResumeConfig>,
 ) -> Result<FolderIngestResultV2> {
@@ -580,6 +594,7 @@ pub fn run_folder_ingest_with_resume(
             agent,
             model,
             stream,
+            progress,
             max_files,
         )?;
         return Ok(FolderIngestResultV2 {
@@ -623,6 +638,12 @@ pub fn run_folder_ingest_with_resume(
     let mut failures: Vec<(PathBuf, String)> = Vec::new();
     let mut skipped = 0usize;
     let mut succeeded = 0usize;
+    let mut progress_sink = if progress {
+        Some(LineProgressSink::new())
+    } else {
+        None
+    };
+    let mut files_processed = 0usize;
 
     for file in &files {
         let ingest_path = match resolve_ingest_source(file) {
@@ -667,6 +688,13 @@ pub fn run_folder_ingest_with_resume(
             continue;
         }
 
+        if let Some(ref mut sink) = progress_sink {
+            if files_processed > 0 {
+                sink.reset(&source_key);
+            }
+        }
+        files_processed += 1;
+
         let prompt = match expand_ingest_prompt(wiki_root, &ingest_path, prompt_path) {
             Ok(p) => p,
             Err(e) => {
@@ -675,7 +703,7 @@ pub fn run_folder_ingest_with_resume(
             }
         };
 
-        if let Err(e) = run_aikit(wiki_root, &prompt, agent, model, stream) {
+        if let Err(e) = run_aikit(wiki_root, &prompt, agent, model, stream, progress) {
             failures.push((file.clone(), e.to_string()));
             continue;
         }
@@ -702,6 +730,10 @@ pub fn run_folder_ingest_with_resume(
         }
         state.insert(identity, record);
         succeeded += 1;
+    }
+
+    if let Some(ref sink) = progress_sink {
+        sink.emit_footer();
     }
 
     Ok(FolderIngestResultV2 {
@@ -750,6 +782,44 @@ fn validate_text_file(path: &Path) -> Result<()> {
     Ok(())
 }
 
+struct LineProgressSink {
+    progress: RunProgress,
+    last_row: Option<String>,
+}
+
+impl LineProgressSink {
+    fn new() -> Self {
+        Self {
+            progress: RunProgress::new(ProgressViewConfig::default()),
+            last_row: None,
+        }
+    }
+
+    fn push(&mut self, agent_key: &str, event: &AgentEvent) {
+        self.progress.push(agent_key, event);
+        let new_last = self.progress.formatted_lines().last().map(str::to_string);
+        if new_last != self.last_row {
+            if let Some(ref row) = new_last {
+                let _ = writeln!(std::io::stderr(), "{}", row);
+            }
+            self.last_row = new_last;
+        }
+    }
+
+    fn reset(&mut self, next_source_key: &str) {
+        self.emit_footer();
+        self.progress.clear();
+        self.last_row = None;
+        eprintln!("--- {} ---", next_source_key);
+    }
+
+    fn emit_footer(&self) {
+        if let Some(footer) = self.progress.token_footer() {
+            let _ = writeln!(std::io::stderr(), "{}", footer);
+        }
+    }
+}
+
 /// Run ingest via `aikit_sdk::run_agent_events`; emits NDJSON events on stdout.
 pub fn run_aikit(
     wiki_root: &Path,
@@ -757,6 +827,7 @@ pub fn run_aikit(
     agent: &str,
     model: Option<&str>,
     stream: bool,
+    progress: bool,
 ) -> Result<()> {
     if !is_runnable(agent) {
         bail!(
@@ -768,22 +839,33 @@ pub fn run_aikit(
 
     let mut opts = RunOptions::new()
         .with_current_dir(wiki_root.to_path_buf())
-        .with_stream(stream);
+        .with_stream(stream || progress);
     if let Some(m) = model {
         opts = opts.with_model(m.to_string());
     }
 
-    let result = run_agent_events(agent, prompt, opts, |event| {
-        if let Ok(s) = serde_json::to_string(&event) {
-            println!("{}", s);
+    if progress {
+        let mut sink = LineProgressSink::new();
+        let result = run_agent_events(agent, prompt, opts, |event| {
+            sink.push(agent, &event);
+        })
+        .map_err(|e| anyhow::anyhow!("aikit-sdk agent execution failed: {}", e))?;
+        sink.emit_footer();
+        let _ = std::io::stderr().write_all(&result.stderr);
+        if !result.success() {
+            bail!("agent exited with status {:?}", result.exit_code());
         }
-    })
-    .map_err(|e| anyhow::anyhow!("aikit-sdk agent execution failed: {}", e))?;
-
-    let _ = std::io::stderr().write_all(&result.stderr);
-
-    if !result.success() {
-        bail!("agent exited with status {:?}", result.exit_code());
+    } else {
+        let result = run_agent_events(agent, prompt, opts, |event| {
+            if let Ok(s) = serde_json::to_string(&event) {
+                println!("{}", s);
+            }
+        })
+        .map_err(|e| anyhow::anyhow!("aikit-sdk agent execution failed: {}", e))?;
+        let _ = std::io::stderr().write_all(&result.stderr);
+        if !result.success() {
+            bail!("agent exited with status {:?}", result.exit_code());
+        }
     }
     Ok(())
 }
@@ -848,10 +930,11 @@ fn run_ingest_for_path(
     agent: &str,
     model: Option<&str>,
     stream: bool,
+    progress: bool,
 ) -> Result<()> {
     let ingest_path = resolve_ingest_source(file)?;
     let prompt = expand_ingest_prompt(wiki_root, &ingest_path, prompt_path)?;
-    run_aikit(wiki_root, &prompt, agent, model, stream)
+    run_aikit(wiki_root, &prompt, agent, model, stream, progress)
 }
 
 /// Summary returned by [`run_folder_ingest`].
@@ -870,6 +953,7 @@ pub struct FolderIngestResult {
 /// Returns an error immediately (before ingesting any file) if the discovered
 /// file count exceeds `max_files` and `max_files > 0`.
 /// Pass `max_files = 0` for no cap (unlimited).
+#[allow(clippy::too_many_arguments)]
 pub fn run_folder_ingest(
     wiki_root: &Path,
     folder: &Path,
@@ -877,6 +961,7 @@ pub fn run_folder_ingest(
     agent: &str,
     model: Option<&str>,
     stream: bool,
+    progress: bool,
     max_files: usize,
 ) -> Result<FolderIngestResult> {
     let files = discover_md_files(folder)?;
@@ -894,11 +979,28 @@ pub fn run_folder_ingest(
     }
 
     let mut failures: Vec<(PathBuf, String)> = Vec::new();
+    let mut progress_sink = if progress {
+        Some(LineProgressSink::new())
+    } else {
+        None
+    };
 
-    for file in &files {
-        if let Err(e) = run_ingest_for_path(wiki_root, file, prompt_path, agent, model, stream) {
+    for (idx, file) in files.iter().enumerate() {
+        if let Some(ref mut sink) = progress_sink {
+            if idx > 0 {
+                let key = file.display().to_string();
+                sink.reset(&key);
+            }
+        }
+        if let Err(e) =
+            run_ingest_for_path(wiki_root, file, prompt_path, agent, model, stream, progress)
+        {
             failures.push((file.clone(), e.to_string()));
         }
+    }
+
+    if let Some(ref sink) = progress_sink {
+        sink.emit_footer();
     }
 
     let succeeded = total - failures.len();
@@ -988,8 +1090,17 @@ mod tests {
         // cap of 3 with 5 files → error
         let prompt_path = tmp.path().join("ingest.md");
         fs::write(&prompt_path, "Ingest {{INGEST_PATH}} into {{WIKI_ROOT}}\n").unwrap();
-        let err = run_folder_ingest(tmp.path(), &batch, &prompt_path, "codex", None, false, 3)
-            .unwrap_err();
+        let err = run_folder_ingest(
+            tmp.path(),
+            &batch,
+            &prompt_path,
+            "codex",
+            None,
+            false,
+            false,
+            3,
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("5"), "expected file count in error: {msg}");
         assert!(msg.contains("--max-files"), "expected hint in error: {msg}");
@@ -1012,6 +1123,7 @@ mod tests {
             &prompt_path,
             "nonexistent-agent-xyz",
             None,
+            false,
             false,
             0,
         )
@@ -1121,11 +1233,107 @@ mod tests {
     #[test]
     fn agent_not_runnable_returns_error() {
         let tmp = tempdir().unwrap();
-        let err =
-            run_aikit(tmp.path(), "prompt", "nonexistent-agent-xyz", None, false).unwrap_err();
+        let err = run_aikit(
+            tmp.path(),
+            "prompt",
+            "nonexistent-agent-xyz",
+            None,
+            false,
+            false,
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("nonexistent-agent-xyz"), "error: {msg}");
         assert!(msg.contains("available agents"), "error: {msg}");
+    }
+
+    // --- LineProgressSink tests ---
+
+    fn make_assistant_event(text: &str) -> AgentEvent {
+        use aikit_sdk::{
+            AgentEventPayload, AgentEventStream, MessageKind, MessagePhase, MessageRole,
+            StreamMessage,
+        };
+        AgentEvent {
+            agent_key: "test-agent".to_string(),
+            seq: 0,
+            stream: AgentEventStream::Stdout,
+            payload: AgentEventPayload::StreamMessage(StreamMessage {
+                text: text.to_string(),
+                phase: MessagePhase::Delta,
+                role: MessageRole::Assistant,
+                kind: MessageKind::Message,
+                source: AgentEventStream::Stdout,
+                raw_line_seq: 0,
+                turn_id: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn line_progress_sink_push_produces_row() {
+        let mut sink = LineProgressSink::new();
+        let event = make_assistant_event("hello world");
+        sink.push("test-agent", &event);
+        assert_eq!(sink.last_row.as_deref(), Some("assistant> hello world"));
+    }
+
+    #[test]
+    fn line_progress_sink_deduplication() {
+        let mut sink = LineProgressSink::new();
+        let event1 = make_assistant_event("hello");
+        let event2 = make_assistant_event("hello");
+        sink.push("test-agent", &event1);
+        let row_after_first = sink.last_row.clone();
+        sink.push("test-agent", &event2);
+        let row_after_second = sink.last_row.clone();
+        assert_eq!(row_after_first, row_after_second);
+        assert_eq!(row_after_first.as_deref(), Some("assistant> hello"));
+    }
+
+    #[test]
+    fn line_progress_sink_ring_buffer_eviction() {
+        use aikit_sdk::{
+            AgentEventPayload, AgentEventStream, MessageKind, MessagePhase, MessageRole,
+            StreamMessage,
+        };
+        let config = ProgressViewConfig {
+            max_rows: 3,
+            ..Default::default()
+        };
+        let mut sink = LineProgressSink {
+            progress: RunProgress::new(config),
+            last_row: None,
+        };
+        for i in 0..5u32 {
+            let event = AgentEvent {
+                agent_key: "agent".to_string(),
+                seq: i as u64,
+                stream: AgentEventStream::Stdout,
+                payload: AgentEventPayload::StreamMessage(StreamMessage {
+                    text: format!("msg {i}"),
+                    phase: MessagePhase::Delta,
+                    role: MessageRole::Assistant,
+                    kind: MessageKind::Message,
+                    source: AgentEventStream::Stdout,
+                    raw_line_seq: 0,
+                    turn_id: None,
+                }),
+            };
+            sink.push("agent", &event);
+        }
+        assert_eq!(sink.last_row.as_deref(), Some("assistant> msg 4"));
+    }
+
+    #[test]
+    fn line_progress_sink_reset_clears_state() {
+        let mut sink = LineProgressSink::new();
+        let event = make_assistant_event("before reset");
+        sink.push("test-agent", &event);
+        assert!(sink.last_row.is_some());
+        sink.reset("next-file.md");
+        assert!(sink.last_row.is_none());
+        assert_eq!(sink.progress.formatted_lines().count(), 0);
     }
 
     #[cfg(unix)]
@@ -1159,7 +1367,7 @@ mod tests {
             );
 
             let wiki_tmp = tempdir().unwrap();
-            let result = run_aikit(wiki_tmp.path(), "hello", "codex", None, false);
+            let result = run_aikit(wiki_tmp.path(), "hello", "codex", None, false, false);
 
             std::env::set_var("PATH", original_path);
 

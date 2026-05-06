@@ -1145,3 +1145,49 @@ mod unix_tests {
         Ok(())
     }
 }
+
+#[test]
+fn test_ingest_help_contains_progress_flag() -> Result<(), Box<dyn std::error::Error>> {
+    let mut cmd = Command::cargo_bin("agwiki")?;
+    cmd.arg("ingest").arg("--help");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("--progress"));
+    Ok(())
+}
+
+#[test]
+fn test_ingest_progress_with_invalid_agent_exits_nonzero() -> Result<(), Box<dyn std::error::Error>>
+{
+    let tmp = tempdir()?;
+    let root = tmp.path();
+    fs::create_dir_all(root.join("wiki"))?;
+    fs::write(root.join("wiki/index.md"), "# Index\n")?;
+    fs::write(
+        root.join("ingest.md"),
+        "Ingest {{INGEST_PATH}} into {{WIKI_ROOT}}\n",
+    )?;
+    let source_file = root.join("note.md");
+    fs::write(&source_file, "# Note\n")?;
+
+    let output = Command::cargo_bin("agwiki")?
+        .arg("ingest")
+        .arg("--wiki-root")
+        .arg(root)
+        .arg("-a")
+        .arg("nonexistent-agent-xyz-progress")
+        .arg("--progress")
+        .arg(&source_file)
+        .output()?;
+
+    assert!(
+        !output.status.success(),
+        "expected non-zero exit with invalid agent"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains('{'),
+        "expected no NDJSON on stdout when --progress is set, got: {stdout}"
+    );
+    Ok(())
+}
