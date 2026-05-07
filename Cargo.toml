@@ -17,7 +17,7 @@ name = "agwiki"
 path = "src/lib.rs"
 
 [dependencies]
-aikit-sdk = "0.1.50"
+aikit-sdk = "0.2.1"
 anyhow = "1.0"
 axum = "0.7"
 cli-framework = { git = "https://github.com/aroff/cli-framework", rev = "9af4fc7d66ef3a4850cd844ed1b61a62de75b357" }
@@ -49,3 +49,6 @@ predicates = "3.0"
 serde_json = "1.0"
 tempfile = "3.10"
 tokio = { version = "1.37", features = ["macros", "rt", "rt-multi-thread"] }
+
+[patch.crates-io]
+aikit-sdk = { git = "https://github.com/goaikit/aikit" }

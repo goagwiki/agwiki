@@ -257,6 +257,18 @@ fn ingest_spec() -> CommandSpec {
                 help: "Enable resume mode: skip sources already successfully ingested",
             },
             ArgSpec {
+                name: "progress",
+                kind: ArgKind::Flag,
+                short: None,
+                long: None,
+                value_type: ArgValueType::Bool,
+                cardinality: Cardinality::Optional,
+                default: None,
+                conflicts_with: vec![],
+                requires: vec![],
+                help: "Display live human-readable progress on stderr; suppresses per-event NDJSON on stdout",
+            },
+            ArgSpec {
                 name: "force",
                 kind: ArgKind::Flag,
                 short: None,
@@ -624,6 +636,7 @@ fn make_ingest_command() -> Command {
                 let do_force = flag(&args, "force");
                 let do_compile = flag(&args, "compile");
                 let do_stream = flag(&args, "stream");
+                let do_progress = flag(&args, "progress");
 
                 // E-ARGS-005: --force and --ingest-state require --resume
                 if !do_resume && (do_force || opt(&args, "ingest-state").is_some()) {
@@ -660,6 +673,7 @@ fn make_ingest_command() -> Command {
                             agent,
                             model.as_deref(),
                             do_stream,
+                            do_progress,
                             resume_cfg.as_ref(),
                         )?;
                     }
@@ -673,6 +687,7 @@ fn make_ingest_command() -> Command {
                                 agent,
                                 model.as_deref(),
                                 do_stream,
+                                do_progress,
                                 max_files,
                                 Some(cfg),
                             )?;
@@ -697,6 +712,7 @@ fn make_ingest_command() -> Command {
                                 agent,
                                 model.as_deref(),
                                 do_stream,
+                                do_progress,
                                 max_files,
                             )?;
                             eprintln!(
