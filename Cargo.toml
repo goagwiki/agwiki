@@ -51,4 +51,4 @@ tempfile = "3.10"
 tokio = { version = "1.37", features = ["macros", "rt", "rt-multi-thread"] }
 
 [patch.crates-io]
-aikit-sdk = { path = "/home/sysuser/ws001/goaikit/aikit/aikit-sdk" }
+aikit-sdk = { git = "https://github.com/goaikit/aikit" }
