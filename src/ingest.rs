@@ -756,27 +756,37 @@ pub fn resolve_ingest_source(file: &Path) -> Result<PathBuf> {
 }
 
 /// Validate that `path` contains text content (UTF-8 encoded, no null bytes).
+///
+/// Reads the full file (up to [`MAX_INGEST_VALIDATE_BYTES`]) so UTF-8 is not
+/// mis-rejected when a multibyte character spans an early read boundary (e.g.
+/// 8192-byte chunks alone are not always valid UTF-8 prefixes of a valid file).
 fn validate_text_file(path: &Path) -> Result<()> {
     use std::fs::File;
     use std::io::Read;
 
-    let mut file =
-        File::open(path).with_context(|| format!("cannot read file: {}", path.display()))?;
+    const MAX_INGEST_VALIDATE_BYTES: u64 = 256 * 1024 * 1024;
 
-    let mut buffer = [0u8; 8192];
-    let bytes_read = file
-        .read(&mut buffer)
+    let file = File::open(path).with_context(|| format!("cannot read file: {}", path.display()))?;
+
+    let mut buf = Vec::new();
+    let mut limited = file.take(MAX_INGEST_VALIDATE_BYTES + 1);
+    limited
+        .read_to_end(&mut buf)
         .with_context(|| format!("failed to read from file: {}", path.display()))?;
 
-    let sample = &buffer[..bytes_read];
+    if buf.len() as u64 > MAX_INGEST_VALIDATE_BYTES {
+        bail!(
+            "file too large for ingest (max {} bytes): {}",
+            MAX_INGEST_VALIDATE_BYTES,
+            path.display()
+        );
+    }
 
-    // Check for null bytes (binary indicator)
-    if sample.contains(&0) {
+    if buf.contains(&0) {
         bail!("file appears to be binary: {}", path.display());
     }
 
-    // Validate UTF-8 encoding
-    std::str::from_utf8(sample)
+    std::str::from_utf8(&buf)
         .with_context(|| format!("file does not contain valid UTF-8 text: {}", path.display()))?;
 
     Ok(())
@@ -1151,6 +1161,21 @@ mod tests {
         let f = tmp.path().join("x.txt");
         fs::write(&f, "hello text").unwrap();
         assert!(resolve_ingest_source(&f).is_ok());
+    }
+
+    /// UTF-8 character spanning the old 8192-byte sample boundary must still validate.
+    #[test]
+    fn resolve_ingest_source_accepts_utf8_split_across_8192() {
+        let tmp = tempdir().unwrap();
+        let f = tmp.path().join("wide.txt");
+        let mut body = vec![b'a'; 8191];
+        body.extend_from_slice("ä".as_bytes());
+        body.push(b'\n');
+        fs::write(&f, &body).unwrap();
+        assert!(
+            resolve_ingest_source(&f).is_ok(),
+            "valid UTF-8 file must pass when a multibyte char spans byte 8191/8192"
+        );
     }
 
     #[test]
