@@ -766,8 +766,7 @@ fn validate_text_file(path: &Path) -> Result<()> {
 
     const MAX_INGEST_VALIDATE_BYTES: u64 = 256 * 1024 * 1024;
 
-    let file =
-        File::open(path).with_context(|| format!("cannot read file: {}", path.display()))?;
+    let file = File::open(path).with_context(|| format!("cannot read file: {}", path.display()))?;
 
     let mut buf = Vec::new();
     let mut limited = file.take(MAX_INGEST_VALIDATE_BYTES + 1);
