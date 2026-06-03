@@ -3,61 +3,33 @@
 mod harness_tests {
     use cli_framework::app::builder::AppBuilder;
     use cli_framework::app::context::AppContext;
-    use cli_framework::command::{Command, CommandArgs};
+    use cli_framework::command::{FromArgValueMap, IntoCommandSpec};
+    use cli_framework::path;
     use cli_framework::spec::arg_spec::{ArgKind, ArgSpec, ArgValueType, Cardinality};
     use cli_framework::spec::command_tree::{
         CommandPath, CommandSpec, ExitCodeEntry, GroupMetadata,
     };
     use cli_framework::spec::value::ArgValue;
     use cli_framework::testkit::CliTestHarness;
+    use std::collections::HashMap;
     use std::path::PathBuf;
-    use std::sync::Arc;
     use tempfile::tempdir;
 
     struct TestCtx;
     impl AppContext for TestCtx {}
 
-    #[allow(dead_code)]
-    fn flag(args: &CommandArgs, key: &str) -> bool {
-        args.named.get(key).map(|v| v == "true").unwrap_or(false)
+    // ── init typed args ──────────────────────────────────────────────────────
+
+    struct InitArgs {
+        dir: Option<PathBuf>,
     }
 
-    fn opt<'a>(args: &'a CommandArgs, key: &str) -> Option<&'a str> {
-        args.named
-            .get(key)
-            .map(String::as_str)
-            .filter(|s| !s.is_empty())
-    }
-
-    fn wiki_root_arg() -> ArgSpec {
-        ArgSpec {
-            name: "wiki-root",
-            kind: ArgKind::Option,
-            short: Some('C'),
-            long: None,
-            value_type: ArgValueType::String,
-            cardinality: Cardinality::Optional,
-            default: None,
-            conflicts_with: vec![],
-            requires: vec![],
-            help: "Root of the wiki",
-        }
-    }
-
-    fn make_init_cmd() -> Command {
-        Command {
-            id: "init",
-            summary: "Create a new wiki root",
-            syntax: Some("init [dir]"),
-            category: Some("scaffold"),
-            spec: Some(Arc::new(CommandSpec {
+    impl IntoCommandSpec for InitArgs {
+        fn command_spec() -> CommandSpec {
+            CommandSpec {
                 summary: "Create a new wiki root",
-                long_about: None,
-                examples: vec![],
-                aliases: vec![],
-                hidden: false,
-                deprecated: None,
-                env_vars: vec![],
+                syntax: Some("init [dir]"),
+                category: Some("scaffold"),
                 exit_codes: vec![ExitCodeEntry {
                     code: 0,
                     description: "Success",
@@ -65,44 +37,47 @@ mod harness_tests {
                 args: vec![ArgSpec {
                     name: "dir",
                     kind: ArgKind::Positional,
-                    short: None,
-                    long: None,
                     value_type: ArgValueType::String,
                     cardinality: Cardinality::Optional,
                     default: Some(ArgValue::Str(".".into())),
-                    conflicts_with: vec![],
-                    requires: vec![],
                     help: "Directory to initialise",
+                    ..Default::default()
                 }],
-                notes: None,
-            })),
-            validator: None,
-            execute: Arc::new(|_ctx, args| {
-                Box::pin(async move {
-                    let dir = opt(&args, "dir")
-                        .map(PathBuf::from)
-                        .unwrap_or_else(|| PathBuf::from("."));
-                    agwiki::init::run_init(&dir)?;
-                    Ok(())
-                })
-            }),
+                ..Default::default()
+            }
         }
     }
 
-    fn make_check_wiki_cmd() -> Command {
-        Command {
-            id: "wiki",
-            summary: "Check broken wikilinks and orphan pages",
-            syntax: Some("check wiki [--format text|json]"),
-            category: Some("check"),
-            spec: Some(Arc::new(CommandSpec {
+    impl FromArgValueMap for InitArgs {
+        fn from_arg_value_map(map: &HashMap<String, ArgValue>) -> Self {
+            Self {
+                dir: map
+                    .get("dir")
+                    .and_then(|v| {
+                        if let ArgValue::Str(s) = v {
+                            Some(s.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .map(PathBuf::from),
+            }
+        }
+    }
+
+    // ── check wiki typed args ────────────────────────────────────────────────
+
+    struct CheckWikiArgs {
+        wiki_root: Option<PathBuf>,
+        format: Option<String>,
+    }
+
+    impl IntoCommandSpec for CheckWikiArgs {
+        fn command_spec() -> CommandSpec {
+            CommandSpec {
                 summary: "Check broken wikilinks and orphan pages",
-                long_about: None,
-                examples: vec![],
-                aliases: vec![],
-                hidden: false,
-                deprecated: None,
-                env_vars: vec![],
+                syntax: Some("check wiki [--format text|json]"),
+                category: Some("check"),
                 exit_codes: vec![
                     ExitCodeEntry {
                         code: 0,
@@ -114,49 +89,62 @@ mod harness_tests {
                     },
                 ],
                 args: vec![
-                    wiki_root_arg(),
+                    ArgSpec {
+                        name: "wiki-root",
+                        kind: ArgKind::Option,
+                        short: Some('C'),
+                        value_type: ArgValueType::String,
+                        cardinality: Cardinality::Optional,
+                        help: "Root of the wiki",
+                        ..Default::default()
+                    },
                     ArgSpec {
                         name: "format",
                         kind: ArgKind::Option,
-                        short: None,
-                        long: None,
                         value_type: ArgValueType::Enum(vec!["text", "json"]),
                         cardinality: Cardinality::Optional,
                         default: Some(ArgValue::Enum("text".into())),
-                        conflicts_with: vec![],
-                        requires: vec![],
                         help: "Output format",
+                        ..Default::default()
                     },
                 ],
-                notes: None,
-            })),
-            validator: None,
-            execute: Arc::new(|_ctx, args| {
-                Box::pin(async move {
-                    let root = opt(&args, "wiki-root")
-                        .map(PathBuf::from)
-                        .map(Ok)
-                        .unwrap_or_else(|| std::env::current_dir().map_err(anyhow::Error::from))?;
-                    agwiki::upkeep::validate_wiki_root(&root)?;
-                    let report = agwiki::validate::validate_wiki(&root)?;
-                    let fmt = opt(&args, "format").unwrap_or("text");
-                    match fmt {
-                        "json" => println!("{}", report.to_json()?),
-                        _ => println!("{}", report.to_text()),
-                    }
-                    if !report.is_clean() {
-                        std::process::exit(1);
-                    }
-                    Ok(())
-                })
-            }),
+                ..Default::default()
+            }
         }
     }
+
+    impl FromArgValueMap for CheckWikiArgs {
+        fn from_arg_value_map(map: &HashMap<String, ArgValue>) -> Self {
+            Self {
+                wiki_root: map
+                    .get("wiki-root")
+                    .and_then(|v| {
+                        if let ArgValue::Str(s) = v {
+                            Some(s.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .map(PathBuf::from),
+                format: map.get("format").and_then(|v| match v {
+                    ArgValue::Str(s) => Some(s.clone()),
+                    ArgValue::Enum(s) => Some(s.clone()),
+                    _ => None,
+                }),
+            }
+        }
+    }
+
+    // ── app builder ──────────────────────────────────────────────────────────
 
     fn build_test_app() -> cli_framework::app::App<TestCtx> {
         AppBuilder::new()
             .with_version("agwiki", env!("CARGO_PKG_VERSION"))
-            .register_command(make_init_cmd())
+            .register::<InitArgs, _, _>(path!["init"], |_ctx, args| async move {
+                let dir = args.dir.unwrap_or_else(|| PathBuf::from("."));
+                agwiki::init::run_init(&dir)?;
+                Ok(())
+            })
             .unwrap()
             .register_group(
                 &CommandPath::new(&["check"]).unwrap(),
@@ -166,10 +154,23 @@ mod harness_tests {
                 },
             )
             .unwrap()
-            .register_command_at(
-                &CommandPath::new(&["check", "wiki"]).unwrap(),
-                make_check_wiki_cmd(),
-            )
+            .register::<CheckWikiArgs, _, _>(path!["check", "wiki"], |_ctx, args| async move {
+                let root = args
+                    .wiki_root
+                    .map(Ok)
+                    .unwrap_or_else(|| std::env::current_dir().map_err(anyhow::Error::from))?;
+                agwiki::upkeep::validate_wiki_root(&root)?;
+                let report = agwiki::validate::validate_wiki(&root)?;
+                let fmt = args.format.as_deref().unwrap_or("text");
+                match fmt {
+                    "json" => println!("{}", report.to_json()?),
+                    _ => println!("{}", report.to_text()),
+                }
+                if !report.is_clean() {
+                    std::process::exit(1);
+                }
+                Ok(())
+            })
             .unwrap()
             .build(TestCtx)
             .unwrap()
