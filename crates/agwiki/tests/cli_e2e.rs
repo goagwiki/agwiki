@@ -768,7 +768,7 @@ mod unix_tests {
             stub_dir.path(),
             &source_file,
             "codex",
-            &["--resume"],
+            &[],
             &[("AGWIKI_STUB_HITS", &hits)],
             &original_path,
         );
@@ -780,7 +780,7 @@ mod unix_tests {
             stub_dir.path(),
             &source_file,
             "codex",
-            &["--resume"],
+            &[],
             &[("AGWIKI_STUB_HITS", &hits)],
             &original_path,
         );
@@ -824,7 +824,7 @@ mod unix_tests {
             stub_dir.path(),
             &source_file,
             "codex",
-            &["--resume"],
+            &[],
             &[("AGWIKI_STUB_HITS", &hits)],
             &original_path,
         );
@@ -837,7 +837,7 @@ mod unix_tests {
             stub_dir.path(),
             &source_file,
             "codex",
-            &["--resume"],
+            &[],
             &[("AGWIKI_STUB_HITS", &hits)],
             &original_path,
         );
@@ -869,7 +869,7 @@ mod unix_tests {
             stub_dir.path(),
             &source_file,
             "codex",
-            &["--resume"],
+            &[],
             &[("AGWIKI_STUB_HITS", &hits)],
             &original_path,
         );
@@ -885,7 +885,7 @@ mod unix_tests {
             stub_dir.path(),
             &source_file,
             "codex",
-            &["--resume"],
+            &[],
             &[("AGWIKI_STUB_HITS", &hits)],
             &original_path,
         );
@@ -917,7 +917,7 @@ mod unix_tests {
             stub_dir.path(),
             &source_file,
             "codex",
-            &["--resume"],
+            &[],
             &[("AGWIKI_STUB_HITS", &hits)],
             &original_path,
         );
@@ -929,7 +929,7 @@ mod unix_tests {
             stub_dir.path(),
             &source_file,
             "codex",
-            &["--resume", "--force"],
+            &["--force"],
             &[("AGWIKI_STUB_HITS", &hits)],
             &original_path,
         );
@@ -961,7 +961,7 @@ mod unix_tests {
             stub_dir.path(),
             &source_file,
             "codex",
-            &["--resume"],
+            &[],
             &[("AGWIKI_STUB_HITS", &hits)],
             &original_path,
         );
@@ -973,7 +973,7 @@ mod unix_tests {
             stub_dir.path(),
             &source_file,
             "claude",
-            &["--resume"],
+            &[],
             &[("AGWIKI_STUB_HITS", &hits)],
             &original_path,
         );
@@ -1005,7 +1005,7 @@ mod unix_tests {
             stub_dir.path(),
             &source_file,
             "codex",
-            &["--resume", "-m", "MODEL_A"],
+            &["-m", "MODEL_A"],
             &[("AGWIKI_STUB_HITS", &hits)],
             &original_path,
         );
@@ -1017,7 +1017,7 @@ mod unix_tests {
             stub_dir.path(),
             &source_file,
             "codex",
-            &["--resume", "-m", "MODEL_B"],
+            &["-m", "MODEL_B"],
             &[("AGWIKI_STUB_HITS", &hits)],
             &original_path,
         );
@@ -1051,7 +1051,7 @@ mod unix_tests {
             stub_dir.path(),
             &source_file,
             "codex",
-            &["--resume", "--ingest-state", state_rel],
+            &["--ingest-state", state_rel],
             &[("AGWIKI_STUB_HITS", &hits)],
             &original_path,
         );
@@ -1094,7 +1094,6 @@ mod unix_tests {
             .arg("ingest")
             .arg("--wiki-root")
             .arg(root)
-            .arg("--resume")
             .arg("-a")
             .arg("codex")
             .arg("--folder")
@@ -1112,7 +1111,6 @@ mod unix_tests {
             .arg("ingest")
             .arg("--wiki-root")
             .arg(root)
-            .arg("--resume")
             .arg("-a")
             .arg("codex")
             .arg("--folder")
@@ -1165,7 +1163,7 @@ mod unix_tests {
             stub_dir.path(),
             &source_file,
             "codex",
-            &["--resume"],
+            &[],
             &[("AGWIKI_STUB_HITS", &hits)],
             &original_path,
         );
@@ -1213,7 +1211,7 @@ mod unix_tests {
             stub_dir.path(),
             &source_file,
             "codex",
-            &["--resume"],
+            &[],
             &[("AGWIKI_STUB_HITS", &hits)],
             &original_path,
         );
@@ -1233,6 +1231,285 @@ mod unix_tests {
         );
         Ok(())
     }
+
+    // (e) default-on: a plain no-frontmatter source ingested twice with no flags
+    // skips on the second run.
+    #[test]
+    fn test_ingest_default_on_second_run_skips() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = PATH_MUTEX.lock().unwrap();
+
+        let stub_dir = tempdir()?;
+        make_stub_agent(stub_dir.path())?;
+
+        let wiki_tmp = tempdir()?;
+        let root = wiki_tmp.path();
+        setup_wiki(root)?;
+
+        let source_file = root.join("raw/note.md");
+        fs::create_dir_all(source_file.parent().unwrap())?;
+        fs::write(&source_file, "# Note\n")?;
+
+        let hits = root.join("hits.txt");
+        let original_path = std::env::var("PATH").unwrap_or_default();
+
+        let first = run_ingest_with_file(
+            root,
+            stub_dir.path(),
+            &source_file,
+            "codex",
+            &[],
+            &[("AGWIKI_STUB_HITS", &hits)],
+            &original_path,
+        );
+        assert!(first.status.success(), "first run failed");
+        assert_eq!(read_hits(&hits), 1, "expected one agent invocation");
+
+        let second = run_ingest_with_file(
+            root,
+            stub_dir.path(),
+            &source_file,
+            "codex",
+            &[],
+            &[("AGWIKI_STUB_HITS", &hits)],
+            &original_path,
+        );
+        assert!(second.status.success(), "second run failed");
+        assert_eq!(
+            read_hits(&hits),
+            1,
+            "expected default-on idempotency to skip the second run"
+        );
+        Ok(())
+    }
+
+    // (a) external_id authoritative skip: same external_id but changed body still skips.
+    #[test]
+    fn test_ingest_external_id_authoritative_skip() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = PATH_MUTEX.lock().unwrap();
+
+        let stub_dir = tempdir()?;
+        make_stub_agent(stub_dir.path())?;
+
+        let wiki_tmp = tempdir()?;
+        let root = wiki_tmp.path();
+        setup_wiki(root)?;
+
+        let source_file = root.join("raw/note.md");
+        fs::create_dir_all(source_file.parent().unwrap())?;
+        fs::write(&source_file, "---\nexternal_id: vid-123\n---\n# Body v1\n")?;
+
+        let hits = root.join("hits.txt");
+        let original_path = std::env::var("PATH").unwrap_or_default();
+
+        let first = run_ingest_with_file(
+            root,
+            stub_dir.path(),
+            &source_file,
+            "codex",
+            &[],
+            &[("AGWIKI_STUB_HITS", &hits)],
+            &original_path,
+        );
+        assert!(first.status.success(), "first run failed");
+        assert_eq!(read_hits(&hits), 1);
+
+        // Change the BODY (content drifts) but keep the same external_id.
+        fs::write(
+            &source_file,
+            "---\nexternal_id: vid-123\n---\n# Body v2 changed\n",
+        )?;
+        let second = run_ingest_with_file(
+            root,
+            stub_dir.path(),
+            &source_file,
+            "codex",
+            &[],
+            &[("AGWIKI_STUB_HITS", &hits)],
+            &original_path,
+        );
+        assert!(second.status.success(), "second run failed");
+        assert_eq!(
+            read_hits(&hits),
+            1,
+            "expected external_id to be authoritative and skip despite content drift"
+        );
+        Ok(())
+    }
+
+    // (b) policy change reingests even for a same external_id source.
+    #[test]
+    fn test_ingest_external_id_policy_change_reingests() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = PATH_MUTEX.lock().unwrap();
+
+        let stub_dir = tempdir()?;
+        make_stub_agent(stub_dir.path())?;
+
+        let wiki_tmp = tempdir()?;
+        let root = wiki_tmp.path();
+        setup_wiki(root)?;
+
+        let source_file = root.join("raw/note.md");
+        fs::create_dir_all(source_file.parent().unwrap())?;
+        fs::write(&source_file, "---\nexternal_id: vid-123\n---\n# Body\n")?;
+
+        let hits = root.join("hits.txt");
+        let original_path = std::env::var("PATH").unwrap_or_default();
+
+        let first = run_ingest_with_file(
+            root,
+            stub_dir.path(),
+            &source_file,
+            "codex",
+            &[],
+            &[("AGWIKI_STUB_HITS", &hits)],
+            &original_path,
+        );
+        assert!(first.status.success());
+        assert_eq!(read_hits(&hits), 1);
+
+        // Change the ingest policy (ingest.md) → re-ingest even a seen id.
+        fs::write(
+            root.join("ingest.md"),
+            "Ingest policy changed {{INGEST_PATH}} {{WIKI_ROOT}}\n",
+        )?;
+        let second = run_ingest_with_file(
+            root,
+            stub_dir.path(),
+            &source_file,
+            "codex",
+            &[],
+            &[("AGWIKI_STUB_HITS", &hits)],
+            &original_path,
+        );
+        assert!(second.status.success());
+        assert_eq!(
+            read_hits(&hits),
+            2,
+            "expected re-ingest on policy change even for a seen external_id"
+        );
+        Ok(())
+    }
+
+    // (c) --force reingests a seen external_id source.
+    #[test]
+    fn test_ingest_external_id_force_reingests() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = PATH_MUTEX.lock().unwrap();
+
+        let stub_dir = tempdir()?;
+        make_stub_agent(stub_dir.path())?;
+
+        let wiki_tmp = tempdir()?;
+        let root = wiki_tmp.path();
+        setup_wiki(root)?;
+
+        let source_file = root.join("raw/note.md");
+        fs::create_dir_all(source_file.parent().unwrap())?;
+        fs::write(&source_file, "---\nexternal_id: vid-123\n---\n# Body\n")?;
+
+        let hits = root.join("hits.txt");
+        let original_path = std::env::var("PATH").unwrap_or_default();
+
+        let first = run_ingest_with_file(
+            root,
+            stub_dir.path(),
+            &source_file,
+            "codex",
+            &[],
+            &[("AGWIKI_STUB_HITS", &hits)],
+            &original_path,
+        );
+        assert!(first.status.success());
+        assert_eq!(read_hits(&hits), 1);
+
+        let second = run_ingest_with_file(
+            root,
+            stub_dir.path(),
+            &source_file,
+            "codex",
+            &["--force"],
+            &[("AGWIKI_STUB_HITS", &hits)],
+            &original_path,
+        );
+        assert!(second.status.success());
+        assert_eq!(read_hits(&hits), 2, "expected --force to re-ingest");
+        Ok(())
+    }
+
+    // (d) v1 back-compat: a pre-written schema_version:1 line (no external_id) still
+    // parses and matches content identity, so the same source skips.
+    #[test]
+    fn test_ingest_v1_ledger_line_back_compat_skips() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = PATH_MUTEX.lock().unwrap();
+
+        let stub_dir = tempdir()?;
+        make_stub_agent(stub_dir.path())?;
+
+        let wiki_tmp = tempdir()?;
+        let root = wiki_tmp.path();
+        setup_wiki(root)?;
+
+        let source_file = root.join("raw/note.md");
+        fs::create_dir_all(source_file.parent().unwrap())?;
+        let body = "# Note\n";
+        fs::write(&source_file, body)?;
+
+        // Compute the content identity the way core does.
+        let content_sha = agwiki_core::ingest::sha256_hex_file(&source_file)?;
+        let policy_sha = agwiki_core::ingest::ingest_policy_sha256(root)?;
+        let canonical = source_file.canonicalize()?;
+        let wiki_root_canon = root.canonicalize()?;
+        let source_key = agwiki_core::ingest::source_key_for(&wiki_root_canon, &canonical)?;
+
+        // Pre-write a v1 ledger line (NO external_id field).
+        let ledger = root.join(".agwiki/ingest-state.jsonl");
+        fs::create_dir_all(ledger.parent().unwrap())?;
+        let line = format!(
+            r#"{{"schema_version":1,"status":"success","wiki_root":"{}","source_key":"{}","content_sha256":"{}","ingest_policy_sha256":"{}","agent":"codex","model":null,"completed_at":"2026-01-01T00:00:00Z","agwiki_version":"0.0.0"}}"#,
+            wiki_root_canon.to_str().unwrap(),
+            source_key,
+            content_sha,
+            policy_sha,
+        );
+        fs::write(&ledger, format!("{line}\n"))?;
+
+        let hits = root.join("hits.txt");
+        let original_path = std::env::var("PATH").unwrap_or_default();
+
+        // Pass --wiki-root as the canonical path so wiki_root strings match the v1 line.
+        std::env::set_var(
+            "PATH",
+            format!("{}:{}", stub_dir.path().display(), original_path),
+        );
+        let output = Command::cargo_bin("agwiki")
+            .unwrap()
+            .arg("ingest")
+            .arg("--wiki-root")
+            .arg(&wiki_root_canon)
+            .arg("-a")
+            .arg("codex")
+            .arg(&source_file)
+            .env("AGWIKI_STUB_HITS", &hits)
+            .output()
+            .unwrap();
+        std::env::set_var("PATH", original_path);
+
+        assert!(
+            output.status.success(),
+            "run failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            read_hits(&hits),
+            0,
+            "expected a v1 ledger line to parse and match content identity → skip"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("SKIP:"),
+            "expected skip notice on stderr: {stderr}"
+        );
+        Ok(())
+    }
 }
 
 #[test]
@@ -1242,6 +1519,17 @@ fn test_ingest_help_contains_progress_flag() -> Result<(), Box<dyn std::error::E
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("--progress"));
+    Ok(())
+}
+
+#[test]
+fn test_ingest_help_has_external_id_and_no_resume() -> Result<(), Box<dyn std::error::Error>> {
+    let mut cmd = Command::cargo_bin("agwiki")?;
+    cmd.arg("ingest").arg("--help");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("--external-id"))
+        .stdout(predicate::str::contains("--resume").not());
     Ok(())
 }
 

@@ -15,10 +15,7 @@ use agwiki::ingest_render::IngestRenderer;
 use agwiki::serve::{run_serve_blocking, ServerConfig};
 use agwiki_core::compile::{run_compile, run_export_html, run_new, CompileOptions};
 use agwiki_core::export_skill::{run_export, ExportOptions};
-use agwiki_core::ingest::{
-    run_folder_ingest, run_folder_ingest_with_resume, run_ingest_file_with_resume,
-    IngestResumeConfig,
-};
+use agwiki_core::ingest::{run_folder_ingest_batch, run_ingest_file, IngestConfig};
 use agwiki_core::init::run_init;
 use agwiki_core::toolkit::require_wiki_ingest_prompt;
 use agwiki_core::upkeep::validate_wiki_root;
@@ -163,10 +160,10 @@ pub struct IngestArgs {
     pub folder: Option<PathBuf>,
     pub max_files: usize,
     pub compile: bool,
-    pub resume: bool,
     pub progress: bool,
     pub force: bool,
     pub ingest_state: Option<PathBuf>,
+    pub external_id: Option<String>,
 }
 
 impl IntoCommandSpec for IngestArgs {
@@ -178,12 +175,17 @@ impl IntoCommandSpec for IngestArgs {
             long_about: Some(
                 "Expands {{INGEST_PATH}} and {{WIKI_ROOT}} in <wiki-root>/ingest.md. \
                  The agent is resolved by precedence: -a/--agent, then AGWIKI_AGENT, \
-                 then [defaults].agent in <wiki-root>/.agwiki/config.toml.",
+                 then [defaults].agent in <wiki-root>/.agwiki/config.toml. \
+                 Idempotency is always on: the ledger at <wiki-root>/.agwiki/ingest-state.jsonl \
+                 is always written and consulted, so an already-ingested source is skipped. \
+                 Identity is external-id-authoritative (from --external-id or frontmatter \
+                 external_id), falling back to content identity. Pass --force to re-ingest.",
             ),
             examples: vec![
                 "agwiki ingest -a opencode ./raw/note.md",
                 "agwiki ingest -a codex --folder ./raw --max-files 0",
-                "agwiki ingest --resume -a codex ./raw/note.md",
+                "agwiki ingest -a codex --external-id vid-123 ./raw/note.md",
+                "agwiki ingest --force -a codex ./raw/note.md",
                 "agwiki ingest ./raw/note.md   # agent from .agwiki/config.toml",
             ],
             exit_codes: vec![
@@ -261,11 +263,12 @@ impl IntoCommandSpec for IngestArgs {
                     ..Default::default()
                 },
                 ArgSpec {
-                    name: "resume",
-                    kind: ArgKind::Flag,
-                    value_type: ArgValueType::Bool,
+                    name: "external-id",
+                    kind: ArgKind::Option,
+                    value_type: ArgValueType::String,
                     cardinality: Cardinality::Optional,
-                    help: "Enable resume mode: skip sources already successfully ingested",
+                    conflicts_with: vec!["folder"],
+                    help: "Stable external id for this source (overrides frontmatter external_id; single-file only)",
                     ..Default::default()
                 },
                 ArgSpec {
@@ -281,8 +284,7 @@ impl IntoCommandSpec for IngestArgs {
                     kind: ArgKind::Flag,
                     value_type: ArgValueType::Bool,
                     cardinality: Cardinality::Optional,
-                    requires: vec!["resume"],
-                    help: "Force re-ingest even when resume finds a matching success record",
+                    help: "Force re-ingest even when the ledger holds a matching success record",
                     ..Default::default()
                 },
                 ArgSpec {
@@ -290,7 +292,6 @@ impl IntoCommandSpec for IngestArgs {
                     kind: ArgKind::Option,
                     value_type: ArgValueType::String,
                     cardinality: Cardinality::Optional,
-                    requires: vec!["resume"],
                     help: "Path to the ingest-state JSONL ledger (default: <wiki-root>/.agwiki/ingest-state.jsonl)",
                     ..Default::default()
                 },
@@ -362,7 +363,6 @@ impl FromArgValueMap for IngestArgs {
                 })
                 .unwrap_or(30),
             compile: matches!(map.get("compile"), Some(ArgValue::Bool(true))),
-            resume: matches!(map.get("resume"), Some(ArgValue::Bool(true))),
             progress: matches!(map.get("progress"), Some(ArgValue::Bool(true))),
             force: matches!(map.get("force"), Some(ArgValue::Bool(true))),
             ingest_state: map
@@ -375,6 +375,16 @@ impl FromArgValueMap for IngestArgs {
                     }
                 })
                 .map(PathBuf::from),
+            external_id: map
+                .get("external-id")
+                .and_then(|v| {
+                    if let ArgValue::Str(s) = v {
+                        Some(s.clone())
+                    } else {
+                        None
+                    }
+                })
+                .filter(|s| !s.trim().is_empty()),
         }
     }
 }
@@ -405,26 +415,15 @@ async fn execute_ingest(args: IngestArgs) -> Result<()> {
         op_cfg.defaults.model,
     );
 
-    let do_resume = args.resume;
     let do_force = args.force;
     let do_compile = args.compile;
     let do_stream = args.stream;
     let do_progress = args.progress;
 
-    // E-ARGS-005: --force and --ingest-state require --resume
-    if !do_resume && (do_force || args.ingest_state.is_some()) {
-        anyhow::bail!("--force and --ingest-state require --resume");
-    }
-
-    let resume_cfg = if do_resume {
-        let state_path = resolve_ingest_state_path(&root, args.ingest_state)?;
-        Some(IngestResumeConfig {
-            resume: true,
-            force: do_force,
-            ingest_state_path: state_path,
-        })
-    } else {
-        None
+    let cfg = IngestConfig {
+        force: do_force,
+        ingest_state_path: resolve_ingest_state_path(&root, args.ingest_state)?,
+        external_id: args.external_id,
     };
 
     let file = args.file;
@@ -437,7 +436,7 @@ async fn execute_ingest(args: IngestArgs) -> Result<()> {
         (Some(file), None) => {
             let prompt_path = require_wiki_ingest_prompt(&root)?;
             let mut sink = renderer.sink();
-            run_ingest_file_with_resume(
+            run_ingest_file(
                 &root,
                 &file,
                 &prompt_path,
@@ -445,66 +444,38 @@ async fn execute_ingest(args: IngestArgs) -> Result<()> {
                 model.as_deref(),
                 do_stream,
                 do_progress,
-                resume_cfg.as_ref(),
+                &cfg,
                 &mut sink,
             )?;
         }
         (None, Some(folder)) => {
             let prompt_path = require_wiki_ingest_prompt(&root)?;
-            if let Some(cfg) = resume_cfg.as_ref() {
-                let mut sink = renderer.sink();
-                let result = run_folder_ingest_with_resume(
-                    &root,
-                    &folder,
-                    &prompt_path,
-                    agent,
-                    model.as_deref(),
-                    do_stream,
-                    do_progress,
-                    max_files,
-                    Some(cfg),
-                    &mut sink,
-                )?;
-                drop(sink);
-                eprintln!(
-                    "Batch ingest: {} total, {} succeeded, {} skipped, {} failed.",
-                    result.total,
-                    result.succeeded,
-                    result.skipped,
-                    result.failures.len()
-                );
-                for (path, err) in &result.failures {
-                    eprintln!("  FAILED: {} — {}", path.display(), err);
-                }
-                if !result.failures.is_empty() {
-                    std::process::exit(1);
-                }
-            } else {
-                let mut sink = renderer.sink();
-                let result = run_folder_ingest(
-                    &root,
-                    &folder,
-                    &prompt_path,
-                    agent,
-                    model.as_deref(),
-                    do_stream,
-                    do_progress,
-                    max_files,
-                    &mut sink,
-                )?;
-                drop(sink);
-                eprintln!(
-                    "Batch ingest: {} total, {} succeeded, {} failed.",
-                    result.total,
-                    result.succeeded,
-                    result.failures.len()
-                );
-                for (path, err) in &result.failures {
-                    eprintln!("  FAILED: {} — {}", path.display(), err);
-                }
-                if !result.failures.is_empty() {
-                    std::process::exit(1);
-                }
+            let mut sink = renderer.sink();
+            let result = run_folder_ingest_batch(
+                &root,
+                &folder,
+                &prompt_path,
+                agent,
+                model.as_deref(),
+                do_stream,
+                do_progress,
+                max_files,
+                &cfg,
+                &mut sink,
+            )?;
+            drop(sink);
+            eprintln!(
+                "Batch ingest: {} total, {} succeeded, {} skipped, {} failed.",
+                result.total,
+                result.succeeded,
+                result.skipped,
+                result.failures.len()
+            );
+            for (path, err) in &result.failures {
+                eprintln!("  FAILED: {} — {}", path.display(), err);
+            }
+            if !result.failures.is_empty() {
+                std::process::exit(1);
             }
         }
         (Some(_), Some(_)) => {
