@@ -1,4 +1,4 @@
-use agwiki::validate::ValidationReport;
+use agwiki_core::validate::ValidationReport;
 use serde_json::Value;
 use std::fs;
 use tempfile::tempdir;

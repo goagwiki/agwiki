@@ -1,0 +1,47 @@
+[package]
+name = "agwiki"
+version.workspace = true
+edition.workspace = true
+description = "Agent-based wiki: init, ingest, validate, skill export"
+license.workspace = true
+repository.workspace = true
+keywords = ["wiki", "markdown", "cli", "agent"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "agwiki"
+path = "src/main.rs"
+
+[lib]
+name = "agwiki"
+path = "src/lib.rs"
+
+[dependencies]
+agwiki-core = { path = "../agwiki-core" }
+aikit-sdk = "0.2.1"
+anyhow = "1.0"
+axum = "0.7"
+cli-framework = { git = "https://github.com/aroff/cli-framework", rev = "76a83e0d57e88b55e5f8c44fd3dffe1444443924" }
+http = "1.4"
+mime = "0.3"
+mime_guess = "2.0"
+regex = "1.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+time = { version = "0.3", features = ["formatting"] }
+tokio = { version = "1.52", features = ["macros", "net", "rt", "rt-multi-thread", "signal"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace"] }
+webbrowser = "1.0"
+
+[target.'cfg(target_env = "musl")'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
+
+[dev-dependencies]
+agwiki-core = { path = "../agwiki-core" }
+assert_cmd = "2.2"
+cli-framework = { git = "https://github.com/aroff/cli-framework", rev = "76a83e0d57e88b55e5f8c44fd3dffe1444443924", features = ["testkit"] }
+predicates = "3.0"
+serde_json = "1.0"
+tempfile = "3.10"
+tokio = { version = "1.52", features = ["macros", "rt", "rt-multi-thread"] }

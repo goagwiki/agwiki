@@ -1,4 +1,4 @@
-use agwiki::upkeep::{check_links, list_orphans};
+use agwiki_core::upkeep::{check_links, list_orphans};
 use std::fs;
 use tempfile::tempdir;
 

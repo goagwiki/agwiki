@@ -1,0 +1,33 @@
+[package]
+name = "agwiki-core"
+version.workspace = true
+edition.workspace = true
+description = "agwiki core: init, ingest, validate, compile, skill export (pure business logic)"
+license.workspace = true
+repository.workspace = true
+keywords = ["wiki", "markdown", "agent"]
+categories = ["text-processing"]
+
+[lib]
+name = "agwiki_core"
+path = "src/lib.rs"
+
+[dependencies]
+aikit-sdk = "0.2.1"
+anyhow = "1.0"
+pulldown-cmark = "0.13"
+regex = "1.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+sha2 = "0.11"
+ulid = "1.1"
+time = { version = "0.3", features = ["formatting"] }
+toml = "0.8"
+
+[target.'cfg(target_env = "musl")'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
+
+[dev-dependencies]
+serde_json = "1.0"
+tempfile = "3.10"

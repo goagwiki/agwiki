@@ -1,4 +1,6 @@
-use agwiki::toolkit::{expand_ingest_prompt, require_wiki_ingest_prompt, wiki_ingest_prompt_path};
+use agwiki_core::toolkit::{
+    expand_ingest_prompt, require_wiki_ingest_prompt, wiki_ingest_prompt_path,
+};
 use std::fs;
 use tempfile::tempdir;
 

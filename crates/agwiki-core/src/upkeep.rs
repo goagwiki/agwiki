@@ -6,12 +6,12 @@ use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 
-pub(crate) fn wikilink_re() -> &'static Regex {
+pub fn wikilink_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| Regex::new(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]").unwrap())
 }
 
-pub(crate) fn mdlink_re() -> &'static Regex {
+pub fn mdlink_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| Regex::new(r"\[[^\]]*\]\(([^)]+)\)").unwrap())
 }
@@ -35,7 +35,7 @@ pub fn validate_wiki_root(wiki_home: &Path) -> Result<PathBuf> {
 }
 
 /// Resolve `rel` under `root` (root must be canonical). Works when the leaf path does not exist.
-pub(crate) fn resolve_under_root(root: &Path, rel: &Path) -> Option<PathBuf> {
+pub fn resolve_under_root(root: &Path, rel: &Path) -> Option<PathBuf> {
     let mut out = root.to_path_buf();
     for c in rel.components() {
         match c {
@@ -55,7 +55,7 @@ pub(crate) fn resolve_under_root(root: &Path, rel: &Path) -> Option<PathBuf> {
     out.starts_with(root).then_some(out)
 }
 
-pub(crate) fn norm_wikilink_target(wiki: &Path, target: &str) -> Option<PathBuf> {
+pub fn norm_wikilink_target(wiki: &Path, target: &str) -> Option<PathBuf> {
     let mut t = target.trim();
     if t.is_empty() || t.starts_with("http://") || t.starts_with("https://") {
         return None;
@@ -74,7 +74,7 @@ pub(crate) fn norm_wikilink_target(wiki: &Path, target: &str) -> Option<PathBuf>
     resolve_under_root(wiki, Path::new(&rel))
 }
 
-pub(crate) fn norm_md_link(wiki: &Path, src_file: &Path, target: &str) -> Option<PathBuf> {
+pub fn norm_md_link(wiki: &Path, src_file: &Path, target: &str) -> Option<PathBuf> {
     let t = target.trim();
     if t.is_empty() || t.contains("://") || t.starts_with('#') {
         return None;
@@ -88,7 +88,7 @@ pub(crate) fn norm_md_link(wiki: &Path, src_file: &Path, target: &str) -> Option
     out.starts_with(wiki).then_some(out)
 }
 
-pub(crate) fn walk_md(dir: &Path) -> Vec<PathBuf> {
+pub fn walk_md(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {

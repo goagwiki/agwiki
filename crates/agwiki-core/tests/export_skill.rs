@@ -1,4 +1,4 @@
-use agwiki::export_skill::{
+use agwiki_core::export_skill::{
     merge_skill_generated_index, run_export, wiki_mirror_sections, ExportOptions,
     GENERATED_INDEX_END, GENERATED_INDEX_START,
 };

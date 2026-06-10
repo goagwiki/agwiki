@@ -11,17 +11,18 @@ use cli_framework::spec::value::ArgValue;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use agwiki::compile::{run_compile, run_export_html, run_new, CompileOptions};
-use agwiki::export_skill::{run_export, ExportOptions};
-use agwiki::ingest::{
+use agwiki::ingest_render::IngestRenderer;
+use agwiki::serve::{run_serve_blocking, ServerConfig};
+use agwiki_core::compile::{run_compile, run_export_html, run_new, CompileOptions};
+use agwiki_core::export_skill::{run_export, ExportOptions};
+use agwiki_core::ingest::{
     run_folder_ingest, run_folder_ingest_with_resume, run_ingest_file_with_resume,
     IngestResumeConfig,
 };
-use agwiki::init::run_init;
-use agwiki::serve::{run_serve_blocking, ServerConfig};
-use agwiki::toolkit::require_wiki_ingest_prompt;
-use agwiki::upkeep::validate_wiki_root;
-use agwiki::validate::validate_wiki;
+use agwiki_core::init::run_init;
+use agwiki_core::toolkit::require_wiki_ingest_prompt;
+use agwiki_core::upkeep::validate_wiki_root;
+use agwiki_core::validate::validate_wiki;
 
 // ── Application context ──────────────────────────────────────────────────────
 
@@ -420,9 +421,12 @@ async fn execute_ingest(args: IngestArgs) -> Result<()> {
     let folder = args.folder;
     let max_files = args.max_files;
 
+    let mut renderer = IngestRenderer::new(do_progress);
+
     match (file, folder) {
         (Some(file), None) => {
             let prompt_path = require_wiki_ingest_prompt(&root)?;
+            let mut sink = renderer.sink();
             run_ingest_file_with_resume(
                 &root,
                 &file,
@@ -432,11 +436,13 @@ async fn execute_ingest(args: IngestArgs) -> Result<()> {
                 do_stream,
                 do_progress,
                 resume_cfg.as_ref(),
+                &mut sink,
             )?;
         }
         (None, Some(folder)) => {
             let prompt_path = require_wiki_ingest_prompt(&root)?;
             if let Some(cfg) = resume_cfg.as_ref() {
+                let mut sink = renderer.sink();
                 let result = run_folder_ingest_with_resume(
                     &root,
                     &folder,
@@ -447,7 +453,9 @@ async fn execute_ingest(args: IngestArgs) -> Result<()> {
                     do_progress,
                     max_files,
                     Some(cfg),
+                    &mut sink,
                 )?;
+                drop(sink);
                 eprintln!(
                     "Batch ingest: {} total, {} succeeded, {} skipped, {} failed.",
                     result.total,
@@ -462,6 +470,7 @@ async fn execute_ingest(args: IngestArgs) -> Result<()> {
                     std::process::exit(1);
                 }
             } else {
+                let mut sink = renderer.sink();
                 let result = run_folder_ingest(
                     &root,
                     &folder,
@@ -471,7 +480,9 @@ async fn execute_ingest(args: IngestArgs) -> Result<()> {
                     do_stream,
                     do_progress,
                     max_files,
+                    &mut sink,
                 )?;
+                drop(sink);
                 eprintln!(
                     "Batch ingest: {} total, {} succeeded, {} failed.",
                     result.total,

@@ -1,54 +1,12 @@
-[package]
-name = "agwiki"
+[workspace]
+members = ["crates/agwiki-core", "crates/agwiki"]
+resolver = "2"
+
+[workspace.package]
 version = "0.3.9"
 edition = "2021"
-description = "Agent-based wiki: init, ingest, validate, skill export"
 license = "Apache-2.0"
 repository = "https://github.com/goagwiki/agwiki"
-keywords = ["wiki", "markdown", "cli", "agent"]
-categories = ["command-line-utilities"]
-
-[[bin]]
-name = "agwiki"
-path = "src/main.rs"
-
-[lib]
-name = "agwiki"
-path = "src/lib.rs"
-
-[dependencies]
-aikit-sdk = "0.2.1"
-anyhow = "1.0"
-axum = "0.7"
-cli-framework = { git = "https://github.com/aroff/cli-framework", rev = "76a83e0d57e88b55e5f8c44fd3dffe1444443924" }
-http = "1.4"
-mime = "0.3"
-mime_guess = "2.0"
-pulldown-cmark = "0.13"
-regex = "1.10"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-serde_yaml = "0.9"
-sha2 = "0.11"
-ulid = "1.1"
-time = { version = "0.3", features = ["formatting"] }
-tokio = { version = "1.52", features = ["macros", "net", "rt", "rt-multi-thread", "signal"] }
-toml = "0.8"
-tower = "0.5"
-tower-http = { version = "0.6", features = ["trace"] }
-webbrowser = "1.0"
-
-
-[target.'cfg(target_env = "musl")'.dependencies]
-openssl = { version = "0.10", features = ["vendored"] }
-
-[dev-dependencies]
-assert_cmd = "2.2"
-cli-framework = { git = "https://github.com/aroff/cli-framework", rev = "76a83e0d57e88b55e5f8c44fd3dffe1444443924", features = ["testkit"] }
-predicates = "3.0"
-serde_json = "1.0"
-tempfile = "3.10"
-tokio = { version = "1.52", features = ["macros", "rt", "rt-multi-thread"] }
 
 [patch.crates-io]
 aikit-sdk = { git = "https://github.com/goaikit/aikit" }
