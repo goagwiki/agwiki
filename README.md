@@ -36,7 +36,19 @@ agwiki ingest --resume -a codex ./raw/note.md
 
 ## What you need to use ingest
 
-- No separate installation required. Ingest uses **aikit-sdk** (bundled as a Cargo dependency) to run agents directly in-process, emitting **NDJSON lines on stdout** via an SDK event callback. **`-a` / `--agent` is required** (no default; see aikit-sdk / agent keys). Optional **`-m` / `--model`** and **`--stream`**.
+- No separate installation required. Ingest uses **aikit-sdk** (bundled as a Cargo dependency) to run agents directly in-process, emitting **NDJSON lines on stdout** via an SDK event callback. The **agent** is resolved by precedence: **`-a` / `--agent`** flag → **`AGWIKI_AGENT`** env var → **`[defaults].agent`** in `.agwiki/config.toml` (see below). If none provides one, ingest exits with an error. The **model** follows the same precedence (`-m` / `--model` → `AGWIKI_MODEL` → `[defaults].model`); `--stream` is optional.
+
+### Operator settings — `.agwiki/config.toml`
+
+Operator defaults live in a git-ignored **`<wiki-root>/.agwiki/config.toml`**, kept separate from the committed `agwiki.toml` (wiki schema) and the `.agwiki/ingest-state.jsonl` ledger. It lets you avoid repeating `-a`/`-m` on every run:
+
+```toml
+[defaults]
+agent = "codex"
+model = "gpt-5"   # optional
+```
+
+With this in place, `agwiki ingest ./raw/note.md` runs without `-a`. Flags and `AGWIKI_*` env vars still override the file.
 
 agwiki does **not** handle PDF or YouTube; use other tools for those.
 
@@ -44,7 +56,7 @@ agwiki does **not** handle PDF or YouTube; use other tools for those.
 
 ```text
 agwiki init [DIR]
-agwiki ingest [-C DIR] -a NAME [-m MODEL] [--stream] [--resume [--force] [--ingest-state FILE]] (<FILE> | --folder <DIR> [--max-files N])
+agwiki ingest [-C DIR] [-a NAME] [-m MODEL] [--stream] [--resume [--force] [--ingest-state FILE]] (<FILE> | --folder <DIR> [--max-files N])
 agwiki check wiki [-C DIR] [--format text|json]
 agwiki check sources [-C DIR]
 agwiki export skill [-C DIR] [--skill-root DIR] [--skill-md FILE] [--dry-run] [--prune]
