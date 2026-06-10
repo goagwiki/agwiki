@@ -142,7 +142,7 @@ mod harness_tests {
             .with_version("agwiki", env!("CARGO_PKG_VERSION"))
             .register::<InitArgs, _, _>(path!["init"], |_ctx, args| async move {
                 let dir = args.dir.unwrap_or_else(|| PathBuf::from("."));
-                agwiki::init::run_init(&dir)?;
+                agwiki_core::init::run_init(&dir)?;
                 Ok(())
             })
             .unwrap()
@@ -159,8 +159,8 @@ mod harness_tests {
                     .wiki_root
                     .map(Ok)
                     .unwrap_or_else(|| std::env::current_dir().map_err(anyhow::Error::from))?;
-                agwiki::upkeep::validate_wiki_root(&root)?;
-                let report = agwiki::validate::validate_wiki(&root)?;
+                agwiki_core::upkeep::validate_wiki_root(&root)?;
+                let report = agwiki_core::validate::validate_wiki(&root)?;
                 let fmt = args.format.as_deref().unwrap_or("text");
                 match fmt {
                     "json" => println!("{}", report.to_json()?),
@@ -202,7 +202,7 @@ mod harness_tests {
     #[tokio::test]
     async fn harness_check_wiki_clean() {
         let tmp = tempdir().unwrap();
-        agwiki::init::run_init(tmp.path()).unwrap();
+        agwiki_core::init::run_init(tmp.path()).unwrap();
         let tmp_path = tmp.path().to_string_lossy().to_string();
 
         let app = build_test_app();

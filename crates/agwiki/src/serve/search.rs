@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::upkeep::walk_md;
+use agwiki_core::upkeep::walk_md;
 
 /// In-memory full-text index for markdown files under `wiki/`.
 ///

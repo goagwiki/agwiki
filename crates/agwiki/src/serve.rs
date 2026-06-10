@@ -22,7 +22,7 @@ use tokio::net::TcpListener;
 use tokio::signal;
 use tower::ServiceBuilder;
 
-use crate::upkeep::validate_wiki_root;
+use agwiki_core::upkeep::validate_wiki_root;
 
 mod search;
 mod templates;
@@ -237,7 +237,7 @@ fn version_to_str(v: Version) -> &'static str {
 
 mod handlers {
     use super::*;
-    use crate::upkeep::resolve_under_root;
+    use agwiki_core::upkeep::resolve_under_root;
 
     #[derive(Debug, serde::Deserialize)]
     pub struct SearchQuery {

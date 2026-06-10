@@ -23,6 +23,7 @@ dependencies = [
 name = "agwiki"
 version = "0.3.9"
 dependencies = [
+ "agwiki-core",
  "aikit-sdk",
  "anyhow",
  "assert_cmd",
@@ -33,6 +34,24 @@ dependencies = [
  "mime_guess",
  "openssl",
  "predicates",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "time",
+ "tokio",
+ "tower",
+ "tower-http",
+ "webbrowser",
+]
+
+[[package]]
+name = "agwiki-core"
+version = "0.3.9"
+dependencies = [
+ "aikit-sdk",
+ "anyhow",
+ "openssl",
  "pulldown-cmark",
  "regex",
  "serde",
@@ -41,12 +60,8 @@ dependencies = [
  "sha2",
  "tempfile",
  "time",
- "tokio",
  "toml 0.8.23",
- "tower",
- "tower-http",
  "ulid",
- "webbrowser",
 ]
 
 [[package]]

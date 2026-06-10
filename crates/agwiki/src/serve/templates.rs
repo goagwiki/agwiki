@@ -2,7 +2,7 @@ use regex::Captures;
 use std::borrow::Cow;
 use std::path::Path;
 
-use crate::upkeep::{mdlink_re, norm_md_link, norm_wikilink_target, wikilink_re};
+use agwiki_core::upkeep::{mdlink_re, norm_md_link, norm_wikilink_target, wikilink_re};
 
 /// Embedded web UI assets and basic string-template rendering helpers.
 #[derive(Debug, Clone)]
@@ -145,7 +145,7 @@ where
 ///
 /// Raw HTML is stripped to reduce script injection risk when browsing untrusted content.
 pub fn markdown_to_html(markdown: &str) -> String {
-    crate::markdown_html::markdown_to_html(markdown)
+    agwiki_core::markdown_html::markdown_to_html(markdown)
 }
 
 fn html_escape(s: &str) -> String {
