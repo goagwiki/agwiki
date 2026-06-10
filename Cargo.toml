@@ -3,7 +3,7 @@ members = ["crates/agwiki-core", "crates/agwiki"]
 resolver = "2"
 
 [workspace.package]
-version = "0.3.9"
+version = "0.3.10"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/goagwiki/agwiki"
