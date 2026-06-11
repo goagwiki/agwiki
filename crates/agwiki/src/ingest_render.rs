@@ -9,7 +9,7 @@
 //!   footer flushed at the end of each agent run and `--- <key> ---` separators between
 //!   files in folder mode.
 //!
-//! Skip notices (resume mode) are written to stderr as `SKIP: <key> (...)`.
+//! Skip notices (idempotency is always on) are written to stderr as `SKIP: <key> (...)`.
 
 use std::io::Write;
 
