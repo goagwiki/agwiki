@@ -14,7 +14,7 @@ The shape is two verbs around a content model, agnostic at both edges:
 - **ingest** is agnostic to input format — it consumes text/markdown and runs an agent to write the content model. Turning an email, webpage, or video transcript into markdown is **upstream glue**, not agwiki's job: agwiki starts at a local artifact and never fetches from remote services (so there is no auth surface).
 - **materialize** is agnostic to its consumer — it deterministically renders the content model into a `wiki`, `skill`, or `html` target.
 
-It is strongly opinionated by design: no security model, no multi-tenancy, one right way per choice. See [`CONTEXT.md`](CONTEXT.md) for the glossary and [`docs/adr/`](docs/adr) for the decisions behind this design.
+It is built for a single user or a small trusted group — there is no security model or multi-tenancy.
 
 ## Install
 
@@ -77,7 +77,8 @@ Hooks run via `sh -c` from the wiki root with `AGWIKI_*` env vars (`WIKI_ROOT`, 
 
 ```text
 agwiki init [DIR]
-agwiki ingest [-C DIR] [-a NAME] [-m MODEL] [--stream] [--force] [--external-id ID] [--dry-run] [--ingest-state FILE] (<FILE> | --folder <DIR> [--max-files N])
+agwiki new <KIND> [-C DIR] [--title TITLE]
+agwiki ingest [-C DIR] [-a NAME] [-m MODEL] [--stream] [--progress] [--force] [--external-id ID] [--dry-run] [--compile] [--ingest-state FILE] (<FILE> | --folder <DIR> [--max-files N])
 agwiki materialize --target wiki  [-C DIR] [--dry-run]
 agwiki materialize --target skill [-C DIR] [--skill-root DIR] [--skill-md FILE] [--dry-run] [--prune]
 agwiki materialize --target html  [-C DIR] [--out DIR]
@@ -87,7 +88,8 @@ agwiki serve         [-C DIR] [...]
 ```
 
 - **`init`** — Create `DIR` (default `.`) if needed; `DIR` must be empty if it already exists. Writes `agwiki.toml`, creates configured subdirectories, and writes `ingest.md`.
-- **`ingest`** — Resolve the source text file(s), load `<wiki-root>/ingest.md`, expand placeholders, run the agent via **aikit-sdk** with cwd set to the wiki root; stdout shows the NDJSON event stream, skip notices and batch summaries go to stderr. Idempotency is always on (see [Ingest](#ingest)); use `--force` to re-ingest, `--dry-run` to plan only, `--external-id`/frontmatter to set a stable id, `--folder` for batch.
+- **`new`** — Scaffold a new content source file under `content/<KIND>/` for one of the ontology kinds (e.g. `concepts`). `--title` sets the initial entity title.
+- **`ingest`** — Resolve the source text file(s), load `<wiki-root>/ingest.md`, expand placeholders, run the agent via **aikit-sdk** with cwd set to the wiki root; stdout shows the NDJSON event stream, skip notices and batch summaries go to stderr. Idempotency is always on (see [Ingest](#ingest)); use `--force` to re-ingest, `--dry-run` to plan only, `--external-id`/frontmatter to set a stable id, `--folder` for batch. `--progress` renders a live progress view on stderr instead of NDJSON; `--compile` runs `materialize --target wiki` after a successful ingest.
 - **`materialize`** — Render the content model into a concrete **target** layout (the wiki is just one target, not privileged). **`--target` is required** (no default): `wiki`, `skill`, or `html`. Target-specific flags are rejected when paired with the wrong target.
   - **`--target wiki`** — Validate content sources and render generated markdown into `wiki/`. `--dry-run` validates without writing.
   - **`--target skill`** — Mirror each immediate subdirectory of `wiki/` into `skill/references/<name>/`, build a markdown index from `wiki/index.md`, and update the block between `<!-- agwiki:generated-index -->` markers in `SKILL.md` (default `skill/SKILL.md`). Flags: `--skill-root`, `--skill-md`, `--dry-run`, `--prune`.
@@ -111,13 +113,9 @@ Stable fields (paths are strings; `wiki_root` is absolute when canonicalization 
 
 An empty `problems` array means the wiki passed validation.
 
-## Workspace & embedding
+## Use from Python
 
-agwiki is a Cargo workspace:
-
-- **`agwiki-core`** — the pure pipeline library (ingest, content model, materialize, the ledger). Emits an `IngestEvent` stream through a caller-supplied sink; reads no config and writes nothing to stdout, so it embeds cleanly.
-- **`agwiki`** — the CLI (this binary) on top of cli-framework; owns config, hooks, the HTTP browse server (`serve`), and NDJSON rendering.
-- **`agwiki-py`** — a [PyO3](https://pyo3.rs) binding exposing the pipeline to Python (`ingest_file`, `materialize`, `check_wiki`). Build with [maturin](https://www.maturin.rs); see [`crates/agwiki-py/README.md`](crates/agwiki-py/README.md).
+agwiki can also drive the pipeline from Python (`ingest_file`, `materialize`, `check_wiki`) — see [`crates/agwiki-py/README.md`](crates/agwiki-py/README.md).
 
 ## License
 

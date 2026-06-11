@@ -1,191 +1,158 @@
 ---
 name: agwiki
-description: Operates the agwiki CLI for agent-driven markdown wikis — scaffold with init, ingest raw notes via aikit-sdk, check wikilinks and orphans, and export skill bundles aligned with agentskills.io. Use when the user mentions agwiki, agent wiki, wiki ingest, export skill, agwiki.toml, ingest.md, wiki/index.md, skill/references, broken wikilinks, or orphan wiki pages.
-compatibility: Requires agwiki ≥ 0.1.11 (GitHub Releases, Homebrew goagwiki/cli/agwiki, or Scoop goagwiki/scoop-bucket). Command ingest runs an aikit-sdk agent in-process; -a/--agent is required (no default). --folder batch mode added in 0.1.11.
+description: Operates the agwiki CLI for agent-driven markdown wikis — scaffold with init, add sources with new, ingest notes via aikit-sdk (idempotent, external-id aware), check wikilinks and orphans, materialize the content model into wiki/skill/html targets, and browse with serve. Use when the user mentions agwiki, agent wiki, wiki ingest, materialize, .agwiki/config.toml, ingest.md, wiki/index.md, broken wikilinks, or orphan wiki pages.
+compatibility: Requires agwiki ≥ 0.3.12 (GitHub Releases, Homebrew goagwiki/cli/agwiki, or Scoop goagwiki/scoop-bucket). ingest runs an aikit-sdk agent in-process; the agent resolves from -a/--agent, then AGWIKI_AGENT, then .agwiki/config.toml. Idempotency is always on (no --resume flag). compile/export were replaced by `materialize --target`.
 metadata:
-  version: "1.1.0"
+  version: "2.0.0"
 license: Apache-2.0
 ---
 
-# agwiki CLI (tools-agwiki)
+# agwiki CLI
 
-[Agent Wiki](https://github.com/goagwiki/agwiki) is a Rust CLI: **`init`** scaffolds a wiki repo, **`ingest`** runs an embedded agent against `ingest.md`, **`check wiki`** fails on broken links and orphans, **`export skill`** mirrors `wiki/` into an Agent Skill layout, and **`serve`** starts a local browser UI. Format follows [Agent Skills](https://agentskills.io/).
+[Agent Wiki](https://github.com/goagwiki/agwiki) is a Rust CLI that runs an agent-driven wiki pipeline: **`ingest`** turns sources into a structured content model, then **`materialize`** renders that model into a browsable wiki, an [Agent Skill](https://agentskills.io/) bundle, or static HTML. **`check`** fails on broken links and orphans, and **`serve`** opens a local browser UI.
 
-This skill ships inside the agwiki repository under `skill/tools-agwiki/`. To hack the tool itself, use the repo root and `cargo build` / `cargo test`.
+agwiki does **not** fetch or transcode sources — bring normalized text/markdown (your own export, `yt-dlp`, a Gmail export, etc.). It starts from a local file.
 
 ## Repository contract
 
-- Wiki root must contain **`wiki/`**.
-- **`ingest`** requires **`ingest.md`** at the wiki root. The CLI expands **`{{INGEST_PATH}}`** (absolute path to the source `.md`) and **`{{WIKI_ROOT}}`** (absolute wiki root) in that file before running the agent. If `ingest.md` is missing, ingest errors. Copy from upstream `prompts/ingest.md` when adopting an existing repo without `init`.
-- **`agwiki init`** writes **`agwiki.toml`**, creates **`raw/`**, **`templates/`**, **`skill/`**, wiki subtrees (`wiki/concepts`, `topics`, `sources`, `projects`, `people`, `syntheses`), and starter **`wiki/index.md`**, **`wiki/inbox.md`**, **`wiki/log.md`**, plus **`ingest.md`**.
+- The wiki root must contain **`wiki/`**.
+- **`ingest`** requires **`ingest.md`** at the wiki root. The CLI expands **`{{INGEST_PATH}}`** (absolute path to the source file) and **`{{WIKI_ROOT}}`** (absolute wiki root) in it before running the agent. If `ingest.md` is missing, ingest errors. Copy from upstream `prompts/ingest.md` when adopting an existing repo without `init`.
+- **`agwiki init`** writes **`agwiki.toml`**, creates **`raw/`**, **`templates/`**, **`skill/`**, the wiki subtrees (`wiki/concepts`, `topics`, `sources`, `projects`, `people`, `syntheses`), starter **`wiki/index.md`**, **`wiki/inbox.md`**, **`wiki/log.md`**, and **`ingest.md`**.
 
 ## Commands
 
 | Command | Role |
 |---------|------|
-| **`agwiki init [DIR]`** | Create wiki root at `DIR` (default `.`). **Fails if `DIR` exists and is not empty.** |
-| **`agwiki ingest -a <AGENT> <FILE>`** | Ingest a **single** source file (any UTF-8 text, not just `.md`); **`-a` / `--agent` required**. Optional **`-C`**, **`-m`**, **`--stream`**. Conflicts with `--folder`. |
-| **`agwiki ingest -a <AGENT> --folder <DIR>`** | **Batch mode** (≥ 0.1.11): ingest all `*.md` files under `DIR` recursively. Optional **`--max-files`** (default `30`, `0` = unlimited). Conflicts with `<FILE>`. |
-| **`agwiki check wiki`** | Broken wikilinks, relative markdown links, orphan pages (entry pages like **`wiki/index.md`** skipped). Exits **1** if any problem. **`--format text`** (default) or **`json`**. Optional **`-C` / `--wiki-root`**. |
-| **`agwiki export skill`** | For each **immediate subdirectory** of **`wiki/`**, copies `wiki/<name>/**/*.md` → **`skill/references/<name>/`**. Requires **`wiki/index.md`**. Updates **`SKILL.md`** inside **`<!-- agwiki:generated-index -->`** … **`<!-- /agwiki:generated-index -->`** markers. Optional **`-C`**, **`--skill-root`**, **`--skill-md`**, **`--dry-run`**, **`--prune`**. |
-| **`agwiki serve`** | Local HTTP UI for the wiki. Optional **`-C`**, **`--port`** (default `8080`), **`--host`** (default `127.0.0.1`), **`--open`**. |
+| **`agwiki init [DIR]`** | Create a wiki root at `DIR` (default `.`). **Fails if `DIR` exists and is not empty.** |
+| **`agwiki new <KIND>`** | Scaffold a content source file under **`content/<KIND>/`** (e.g. `concepts`). Optional **`--title`**, **`-C`**. |
+| **`agwiki ingest [-a AGENT] <FILE>`** | Ingest a **single** source file (any UTF-8 text). Idempotency is always on. Optional **`-C`**, **`-m`**, **`--stream`**, **`--progress`**, **`--force`**, **`--external-id`**, **`--dry-run`**, **`--compile`**, **`--ingest-state`**. Conflicts with `--folder`. |
+| **`agwiki ingest [-a AGENT] --folder <DIR>`** | **Batch mode**: ingest all `*.md` under `DIR` recursively. Optional **`--max-files`** (default `30`, `0` = unlimited). Conflicts with `<FILE>`. |
+| **`agwiki materialize --target <T>`** | Render the content model into a target layout: **`wiki`**, **`skill`**, or **`html`**. **`--target` is required.** |
+| **`agwiki check wiki`** | Broken wikilinks, relative links, orphan pages. Exits **1** on any problem. **`--format text`** (default) or **`json`**. |
+| **`agwiki check sources`** | Validate content sources without writing wiki files. Exits **1** on errors. |
+| **`agwiki serve`** | Local HTTP UI for the wiki. Optional **`-C`**, **`--port`**, **`--host`**, **`--open`**. |
 
 Omitting **`-C` / `--wiki-root`**: cwd must be the wiki root (contain **`wiki/`**).
 
-## Command reference
+## Ingest
 
-### `agwiki init [DIR]`
+The **agent** resolves by precedence: **`-a`/`--agent`** → **`AGWIKI_AGENT`** env var → **`[defaults].agent`** in `.agwiki/config.toml`. The **model** follows the same precedence (`-m`/`--model` → `AGWIKI_MODEL` → `[defaults].model`). If nothing supplies an agent, ingest errors.
 
-```
-agwiki init               # scaffold wiki in current directory
-agwiki init ./my-wiki     # scaffold into a new subdirectory
-```
+**Idempotency is always on.** Each successful ingest is recorded in **`<wiki-root>/.agwiki/ingest-state.jsonl`**, and an already-ingested source is **skipped** — re-running a folder only ingests what is new. Identity is **external-id-authoritative**: a source carrying an `external_id` (from **`--external-id`** or YAML frontmatter `external_id:` — e.g. an email `Message-ID`, a video id, a URL) is matched on `(wiki_root, external_id, ingest.md hash)`, ignoring content changes. Without an external id, content identity (source path + content hash + agent + model) is the fallback. Changing `ingest.md` re-ingests everything; **`--force`** re-ingests one run.
 
-Fails if the target directory exists and is not empty.
-
-### `agwiki ingest` — single file
+**`--dry-run`** resolves and validates sources and prints a JSON plan (`{"source":…,"action":"ingest"|"skip","reason":…,"external_id":…}`) **without** running the agent or writing the ledger.
 
 ```
 agwiki ingest -a opencode ./raw/note.md
-agwiki ingest -a claude ./raw/note.md
-agwiki ingest -C /path/to/wiki -a claude ./raw/note.md
-agwiki ingest --stream -a opencode ./raw/note.md
-agwiki ingest -a opencode -m <MODEL> ./raw/note.md
-agwiki ingest --resume -a codex ./raw/note.md
-agwiki ingest --resume --force -a codex ./raw/note.md
+agwiki ingest ./raw/note.md                          # agent from .agwiki/config.toml
+agwiki ingest -a codex --external-id vid-123 ./raw/note.md
+agwiki ingest -a codex --dry-run --folder ./raw      # preview, no agent run
+agwiki ingest -a codex --force ./raw/note.md         # re-ingest a seen source
+agwiki ingest -a opencode --folder ./raw --max-files 0
 ```
 
 | Flag | Description |
 |------|-------------|
-| `<FILE>` | Source text file (resolved from cwd; UTF-8, no null bytes). Conflicts with `--folder`. |
-| `-a` / `--agent <NAME>` | aikit-sdk agent key (`opencode`, `claude`, `codex`, `gemini`, …). **Required.** |
-| `-C` / `--wiki-root <DIR>` | Wiki root (default: cwd). |
-| `-m` / `--model <MODEL>` | Model override passed to aikit-sdk. |
+| `<FILE>` | Source text file (UTF-8, no null bytes; any extension). Conflicts with `--folder`. |
+| `--folder <DIR>` | Ingest all `*.md` / `*.MD` under `DIR` recursively (no symlinks, sorted). Conflicts with `<FILE>`. |
+| `--max-files <N>` | Cap for `--folder` (default `30`; `0` = unlimited). Errors **before** ingesting if exceeded. |
+| `-a` / `--agent <NAME>` | aikit-sdk agent key (`opencode`, `claude`, `codex`, `gemini`, …). Falls back to `AGWIKI_AGENT`, then config. |
+| `-m` / `--model <MODEL>` | Model override (falls back to `AGWIKI_MODEL`, then config). |
+| `--external-id <ID>` | Stable id for this source (overrides frontmatter `external_id`; single-file only). |
+| `--force` | Re-ingest even when the ledger holds a matching success record. |
+| `--dry-run` | Emit a JSON plan without running the agent or writing the ledger. |
+| `--compile` | Run `materialize --target wiki` after a successful ingest. |
 | `--stream` | Enable agent-native streaming where supported. |
-| `--resume` | Persist successful ingests to a JSONL ledger and skip re-ingesting sources that already succeeded under the same identity. |
-| `--force` | With `--resume`: force re-ingest even when a matching success record exists (still appends a new success record). |
-| `--ingest-state <FILE>` | With `--resume`: ledger path (default: `<wiki-root>/.agwiki/ingest-state.jsonl`; relative paths resolve under `<wiki-root>`). |
-
-`<FILE>` accepts any UTF-8 text file (`.md`, `.txt`, `.json`, `.yaml`, `.log`, no extension, etc.) — extension is not checked.
-
-### `agwiki ingest --folder` — batch mode (≥ 0.1.11)
-
-```
-agwiki ingest -a opencode --folder ./raw
-agwiki ingest -a claude --folder ./raw --max-files 0
-agwiki ingest -a opencode --folder ./raw --max-files 10
-agwiki ingest -C /path/to/wiki -a claude --folder ./raw
-agwiki ingest --stream -a opencode --folder ./raw
-agwiki ingest --resume -a codex --folder ./raw --max-files 0
-agwiki ingest --resume --ingest-state .agwiki/ingest-state.jsonl -a codex --folder ./raw --max-files 0
-```
-
-| Flag | Description |
-|------|-------------|
-| `--folder <DIR>` | Discover and ingest all `*.md` / `*.MD` files under `DIR` recursively (no symlinks, sorted lexicographically). Conflicts with `<FILE>`. |
-| `--max-files <N>` | Cap on files to ingest (default: `30`; `0` = unlimited). Errors **before** ingesting any file if the count is exceeded. |
-| `-a` / `--agent <NAME>` | aikit-sdk agent key. **Required.** |
+| `--progress` | Render a live progress view on stderr instead of NDJSON. |
+| `--ingest-state <FILE>` | Ledger path (default `<wiki-root>/.agwiki/ingest-state.jsonl`; relative paths resolve under the wiki root). |
 | `-C` / `--wiki-root <DIR>` | Wiki root (default: cwd). |
-| `-m` / `--model <MODEL>` | Model override passed to aikit-sdk. |
-| `--stream` | Enable agent-native streaming where supported. |
-| `--resume` | Persist successful ingests to a JSONL ledger and skip sources that already succeeded under the same identity. |
-| `--force` | With `--resume`: force re-ingest even when a matching success record exists. |
-| `--ingest-state <FILE>` | With `--resume`: ledger path (default: `<wiki-root>/.agwiki/ingest-state.jsonl`; relative paths resolve under `<wiki-root>`). |
 
-**Batch behaviour:** Continues through all discovered files even if individual ones fail. Prints a summary to **stderr** (`Batch ingest: X total, Y succeeded, (skipped), Z failed.`) and lists each failure. Exits **1** if any file failed.
+**Batch behaviour:** continues through all files even if some fail; prints a stderr summary (`Batch ingest: X total, Y succeeded, Z skipped, W failed.`) and lists failures; exits **1** if any file failed.
 
-### `agwiki check wiki`
+## Operator settings — `.agwiki/config.toml`
 
-```
-agwiki check wiki
-agwiki check wiki -C /path/to/wiki
-agwiki check wiki --format json
-```
+A git-ignored **`<wiki-root>/.agwiki/config.toml`** holds operator defaults and lifecycle hooks (kept separate from the committed `agwiki.toml` schema and the `.agwiki/ingest-state.jsonl` ledger):
 
-| Flag | Description |
-|------|-------------|
-| `-C` / `--wiki-root <DIR>` | Wiki root (default: cwd). |
-| `--format <FORMAT>` | `text` (default) or `json`. |
+```toml
+[defaults]
+agent = "codex"
+model = "gpt-5"          # optional
 
-Exits **1** if any broken link or orphan is found. Use in CI as the failing gate.
-
-### `agwiki export skill`
-
-```
-agwiki export skill
-agwiki export skill --prune
-agwiki export skill -C /path/to/wiki --dry-run
-agwiki export skill --skill-root ./my-skill
-agwiki export skill --skill-md ./my-skill/SKILL.md
+[hooks]                  # optional; shell commands run via `sh -c` from the wiki root
+after_source      = "echo ingested $AGWIKI_SOURCE_KEY"
+after_batch       = "echo $AGWIKI_INGESTED ingested, $AGWIKI_SKIPPED skipped"
+after_materialize = "git -C $AGWIKI_WIKI_ROOT add -A && git commit -m materialize"
+on_error          = "echo failed: $AGWIKI_ERROR"
+continue_on_error = false
 ```
 
-| Flag | Description |
-|------|-------------|
-| `-C` / `--wiki-root <DIR>` | Wiki root (default: cwd). |
-| `--skill-root <DIR>` | Agent Skill directory (default: `<wiki-root>/skill`). |
-| `--skill-md <FILE>` | SKILL.md path to create or update (default: `<skill-root>/SKILL.md`). |
-| `--dry-run` | Print planned copies/prunes and generated index; do not write files. |
-| `--prune` | Remove files under `skill/references/` when the source `.md` no longer exists in the wiki. |
+Hooks receive `AGWIKI_*` env vars (`WIKI_ROOT`, `SOURCE`, `SOURCE_KEY`, `EXTERNAL_ID`, `AGENT`, `MODEL`, `TARGET`, batch counts, `ERROR`). A non-zero hook exit fails the command unless `continue_on_error = true`. Hooks never run under `--dry-run`.
 
-Exits **0** even when validation warnings appear on stderr — use `agwiki check wiki` in CI for a hard failure.
+## Materialize
 
-### `agwiki serve`
+`materialize` renders the content model into a required **`--target`** layout. Target-specific flags are rejected when paired with the wrong target.
 
 ```
-agwiki serve
-agwiki serve --open
-agwiki serve --port 8081
-agwiki serve --host 0.0.0.0 --port 8080
-agwiki serve -C /path/to/wiki --open
+agwiki materialize --target wiki                       # render content/ into wiki/
+agwiki materialize --target wiki --dry-run             # validate without writing
+agwiki materialize --target skill --dry-run            # preview the skill bundle
+agwiki materialize --target skill --prune              # drop stale skill/references/**
+agwiki materialize --target html --out ./dist/html     # static HTML export
 ```
 
-| Flag | Description |
-|------|-------------|
-| `-C` / `--wiki-root <DIR>` | Wiki root (default: cwd). |
-| `--port <PORT>` | Port to listen on (default: `8080`). |
-| `--host <HOST>` | Host/IP to bind (default: `127.0.0.1`). |
-| `--open` | Automatically open the wiki in the default browser. |
+| Target | Flags | Behaviour |
+|--------|-------|-----------|
+| **`wiki`** | `--dry-run` | Validate content sources and render generated markdown into `wiki/`. |
+| **`skill`** | `--skill-root`, `--skill-md`, `--dry-run`, `--prune` | For each immediate subdirectory of `wiki/`, mirror `wiki/<name>/**/*.md` → `skill/references/<name>/`; build a markdown index from `wiki/index.md`; update the block between `<!-- agwiki:generated-index -->` and `<!-- /agwiki:generated-index -->` in `SKILL.md` (default `skill/SKILL.md`). |
+| **`html`** | `--out` | Static HTML export of the wiki into `--out` (default `dist/html`). |
+
+`materialize --target skill` runs the same checks as `check wiki` afterward and prints **warnings on stderr** but still exits **0** — use `agwiki check wiki` in CI for a failing exit code.
+
+## Check & serve
+
+```
+agwiki check wiki                 # broken links + orphans; exit 1 on any problem
+agwiki check wiki --format json   # machine-readable (see references/validate-json-schema.md)
+agwiki check sources              # validate content sources only
+agwiki serve --open               # browse the wiki locally
+```
+
+`check wiki` flags: `-C`, `--format text|json`. `serve` flags: `-C`, `--port` (default `8080`), `--host` (default `127.0.0.1`), `--open`.
 
 ## Workflows
 
-**New wiki:** `agwiki init <dir>` → edit under **`wiki/`** → `agwiki check wiki` → optional `agwiki export skill`.
+**New wiki:** `agwiki init <dir>` → add sources with `agwiki new <kind>` and edit under `content/` → `agwiki materialize --target wiki` → `agwiki check wiki`.
 
-**Ingest a raw note:** Place or keep the source under **`raw/`** (agents must **not** edit **`raw/`**). Run `agwiki ingest -a <agent> ./raw/note.md` from a cwd where the path resolves. The agent follows rules in **`ingest.md`**: work only under **`wiki/`**, prefer updating existing pages, link related pages, keep **`wiki/index.md`** current, append to **`wiki/log.md`**, use **`wiki/sources/`** and `templates/source-page.md` per the embedded workflow. For the full rule text, read **`ingest.md`** in the wiki root (or upstream `prompts/ingest.md`).
+**Ingest a raw note:** keep the source under **`raw/`** (agents must **not** edit `raw/`). Run `agwiki ingest -a <agent> ./raw/note.md`. The agent follows `ingest.md`: work only under `wiki/`, prefer updating existing pages, link related pages, keep `wiki/index.md` current, append to `wiki/log.md`. Re-running is safe — already-ingested sources are skipped.
 
-**Batch ingest (≥ 0.1.11):** `agwiki ingest -a opencode --folder ./raw` — discovers all `*.md` recursively, default cap of 30 files (pass `--max-files 0` for unlimited).
+**Bulk ingest:** stamp each prepared source's frontmatter with `external_id:` (or pass `--external-id`), then `agwiki ingest -a codex --folder ./raw --max-files 0`. Preview first with `--dry-run`. Re-runs only ingest new ids.
 
-**Resume ingest:** `agwiki ingest --resume -a codex ./raw/note.md` — appends a success record to `<wiki-root>/.agwiki/ingest-state.jsonl` and skips subsequent runs if the same identity matches (wiki root + source key + source hash + `ingest.md` hash + agent + model).
+**Publish a skill bundle:** keep `wiki/index.md` wikilinks accurate → `agwiki materialize --target skill --dry-run` to preview → `agwiki materialize --target skill` (add `--prune` to drop stale references).
 
-**Publish a skill bundle:** Keep **`wiki/index.md`** wikilinks accurate so the generated index matches intent → `agwiki export skill --dry-run` to preview → `agwiki export skill` (add **`--prune`** when wiki pages were removed so stale `skill/references/**` files drop).
-
-**CI pipeline:**
+**CI gate:**
 ```
-agwiki check wiki         # fails on broken links / orphans
-agwiki export skill       # update skill bundle
+agwiki check wiki                    # fails on broken links / orphans
+agwiki materialize --target skill    # refresh the skill bundle
 ```
 
-## HTML comment markers (export skill)
+## HTML comment markers (materialize --target skill)
 
-Use **exactly** this opening line:
+Use **exactly** these lines around the generated index in `SKILL.md`:
 
-`<!-- agwiki:generated-index -->`
+`<!-- agwiki:generated-index -->` … `<!-- /agwiki:generated-index -->`
 
-and this closing line:
-
-`<!-- /agwiki:generated-index -->`
-
-**Pitfalls:** A start marker **without** a matching end (or an end **without** a start) makes **`export skill`** error when merging the generated index. Only **top-level directories directly under `wiki/`** become **`skill/references/<dir>/`**; nested structure under each dir is preserved.
+A start marker without a matching end (or vice versa) makes `materialize --target skill` error. Only top-level directories directly under `wiki/` become `skill/references/<dir>/`; nested structure is preserved.
 
 ## Validation JSON
 
-For machine-readable check output, see [references/validate-json-schema.md](references/validate-json-schema.md). Summary: top-level **`wiki_root`**, **`problems`** array; each problem has **`kind`** (`broken_link` or `orphan`) and a **`message`**. Empty **`problems`** means pass.
+See [references/validate-json-schema.md](references/validate-json-schema.md). Top-level **`wiki_root`** and a **`problems`** array; each problem has **`kind`** (`broken_link` or `orphan`) and a **`message`**. Empty **`problems`** means pass.
 
 ## Limitations
 
-- agwiki does **not** ingest PDF or YouTube; use other tools for those media.
-- `ingest --folder` batch mode requires **≥ 0.1.11**; on 0.1.10 use a shell loop instead.
-- `--agent` has no default value and must always be specified explicitly.
+- agwiki does **not** fetch or transcode sources — it starts from a local UTF-8 text file. Convert email/web/video to markdown with other tools first.
 - `--folder` and `<FILE>` cannot be combined; choose one.
+- `--external-id` applies to single-file ingest; in `--folder` mode each file's id comes from its own frontmatter.
+- There is no security or multi-tenancy model — agwiki is for a single user or a small trusted group.
 
 <!-- agwiki:generated-index -->
 <!-- /agwiki:generated-index -->
