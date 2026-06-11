@@ -156,7 +156,7 @@ async fn execute_init(args: InitArgs) -> Result<()> {
 
 pub struct IngestArgs {
     pub wiki_root: Option<PathBuf>,
-    pub agent: String,
+    pub agent: Option<String>,
     pub model: Option<String>,
     pub stream: bool,
     pub file: Option<PathBuf>,
@@ -177,12 +177,14 @@ impl IntoCommandSpec for IngestArgs {
             category: Some("ingest"),
             long_about: Some(
                 "Expands {{INGEST_PATH}} and {{WIKI_ROOT}} in <wiki-root>/ingest.md. \
-                 -a / --agent is required.",
+                 The agent is resolved by precedence: -a/--agent, then AGWIKI_AGENT, \
+                 then [defaults].agent in <wiki-root>/.agwiki/config.toml.",
             ),
             examples: vec![
                 "agwiki ingest -a opencode ./raw/note.md",
                 "agwiki ingest -a codex --folder ./raw --max-files 0",
                 "agwiki ingest --resume -a codex ./raw/note.md",
+                "agwiki ingest ./raw/note.md   # agent from .agwiki/config.toml",
             ],
             exit_codes: vec![
                 cli_framework::spec::command_tree::ExitCodeEntry {
@@ -201,8 +203,9 @@ impl IntoCommandSpec for IngestArgs {
                     kind: ArgKind::Option,
                     short: Some('a'),
                     value_type: ArgValueType::String,
-                    cardinality: Cardinality::Required,
-                    help: "Agent key for aikit-sdk (required; e.g. opencode, claude, codex)",
+                    cardinality: Cardinality::Optional,
+                    help: "Agent key for aikit-sdk (e.g. opencode, claude, codex). \
+                           Falls back to AGWIKI_AGENT, then [defaults].agent in .agwiki/config.toml",
                     ..Default::default()
                 },
                 ArgSpec {
@@ -310,16 +313,13 @@ impl FromArgValueMap for IngestArgs {
                     }
                 })
                 .map(PathBuf::from),
-            agent: map
-                .get("agent")
-                .and_then(|v| {
-                    if let ArgValue::Str(s) = v {
-                        Some(s.clone())
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or_else(|| panic!("fw bug: missing agent")),
+            agent: map.get("agent").and_then(|v| {
+                if let ArgValue::Str(s) = v {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            }),
             model: map
                 .get("model")
                 .and_then(|v| {
@@ -382,18 +382,28 @@ impl FromArgValueMap for IngestArgs {
 async fn execute_ingest(args: IngestArgs) -> Result<()> {
     let root = resolve_wiki_root(args.wiki_root)?;
 
-    let agent_str = args.agent.trim().to_owned();
-    if agent_str.is_empty() {
-        anyhow::bail!("--agent must not be empty");
-    }
+    // Operator defaults live in <wiki-root>/.agwiki/config.toml (CLI-only; core
+    // never reads it). Precedence: flag > AGWIKI_* env > config > none.
+    let op_cfg = agwiki::config::OperatorConfig::load(&root)?;
+
+    let agent_str = agwiki::config::pick(
+        args.agent,
+        std::env::var("AGWIKI_AGENT").ok(),
+        op_cfg.defaults.agent,
+    )
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "no agent specified: pass -a/--agent, set AGWIKI_AGENT, or add \
+             [defaults]\\nagent = \"...\" to <wiki-root>/.agwiki/config.toml"
+        )
+    })?;
     let agent = agent_str.as_str();
 
-    let model = args
-        .model
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned);
+    let model = agwiki::config::pick(
+        args.model,
+        std::env::var("AGWIKI_MODEL").ok(),
+        op_cfg.defaults.model,
+    );
 
     let do_resume = args.resume;
     let do_force = args.force;

@@ -342,6 +342,95 @@ mod unix_tests {
     }
 
     #[test]
+    fn test_ingest_agent_from_config_default() -> Result<(), Box<dyn std::error::Error>> {
+        // No -a flag: the agent must be resolved from <wiki-root>/.agwiki/config.toml.
+        let _guard = PATH_MUTEX.lock().unwrap();
+
+        let stub_dir = tempdir()?;
+        make_stub_agent(stub_dir.path())?;
+
+        let wiki_tmp = tempdir()?;
+        let root = wiki_tmp.path();
+        fs::create_dir_all(root.join("wiki"))?;
+        fs::write(root.join("wiki/index.md"), "# Index\n")?;
+        fs::write(
+            root.join("ingest.md"),
+            "Ingest {{INGEST_PATH}} into {{WIKI_ROOT}}\n",
+        )?;
+        fs::create_dir_all(root.join(".agwiki"))?;
+        fs::write(
+            root.join(".agwiki/config.toml"),
+            "[defaults]\nagent = \"codex\"\n",
+        )?;
+
+        let source_file = root.join("note.md");
+        fs::write(&source_file, "# Test Note\n")?;
+        let hits = root.join("hits.txt");
+
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var(
+            "PATH",
+            format!("{}:{}", stub_dir.path().display(), original_path),
+        );
+        let output = Command::cargo_bin("agwiki")
+            .unwrap()
+            .arg("ingest")
+            .arg("--wiki-root")
+            .arg(root)
+            .arg(&source_file) // note: no -a
+            .env("AGWIKI_STUB_HITS", &hits)
+            .output();
+        std::env::set_var("PATH", original_path);
+
+        let output = output?;
+        assert!(
+            output.status.success(),
+            "ingest with config-default agent failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            read_hits(&hits),
+            1,
+            "expected the config-default agent to be invoked once"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_ingest_no_agent_anywhere_errors() -> Result<(), Box<dyn std::error::Error>> {
+        // No -a, no AGWIKI_AGENT, no config default -> clear error, no agent run.
+        let _guard = PATH_MUTEX.lock().unwrap();
+
+        let wiki_tmp = tempdir()?;
+        let root = wiki_tmp.path();
+        fs::create_dir_all(root.join("wiki"))?;
+        fs::write(root.join("wiki/index.md"), "# Index\n")?;
+        fs::write(
+            root.join("ingest.md"),
+            "Ingest {{INGEST_PATH}} into {{WIKI_ROOT}}\n",
+        )?;
+        let source_file = root.join("note.md");
+        fs::write(&source_file, "# Test Note\n")?;
+
+        let output = Command::cargo_bin("agwiki")
+            .unwrap()
+            .arg("ingest")
+            .arg("--wiki-root")
+            .arg(root)
+            .arg(&source_file)
+            .env_remove("AGWIKI_AGENT")
+            .output()?;
+
+        assert!(!output.status.success(), "expected failure with no agent");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("no agent specified"),
+            "expected 'no agent specified' error, got: {stderr}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_ingest_txt_file_with_agent_stub() -> Result<(), Box<dyn std::error::Error>> {
         let _guard = PATH_MUTEX.lock().unwrap();
 

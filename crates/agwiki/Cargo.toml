@@ -21,7 +21,7 @@ agwiki-core = { path = "../agwiki-core" }
 aikit-sdk = "0.2.1"
 anyhow = "1.0"
 axum = "0.7"
-cli-framework = { git = "https://github.com/aroff/cli-framework", rev = "76a83e0d57e88b55e5f8c44fd3dffe1444443924" }
+cli-framework = { git = "https://github.com/aroff/cli-framework", rev = "562c991", features = ["project-config"] }
 http = "1.4"
 mime = "0.3"
 mime_guess = "2.0"
@@ -40,7 +40,7 @@ openssl = { version = "0.10", features = ["vendored"] }
 [dev-dependencies]
 agwiki-core = { path = "../agwiki-core" }
 assert_cmd = "2.2"
-cli-framework = { git = "https://github.com/aroff/cli-framework", rev = "76a83e0d57e88b55e5f8c44fd3dffe1444443924", features = ["testkit"] }
+cli-framework = { git = "https://github.com/aroff/cli-framework", rev = "562c991", features = ["testkit"] }
 predicates = "3.0"
 serde_json = "1.0"
 tempfile = "3.10"
