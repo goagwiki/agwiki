@@ -11,7 +11,7 @@ use std::fs::OpenOptions;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
-use crate::event::IngestEvent;
+use crate::event::{IngestEvent, PlanAction};
 use crate::toolkit::expand_ingest_prompt;
 use aikit_sdk::{is_runnable, run_agent_events, runnable_agents, RunOptions};
 use time::format_description::well_known::Rfc3339;
@@ -131,6 +131,7 @@ pub struct IngestIdentity {
 ///   force: false,
 ///   ingest_state_path: Path::new(".agwiki/ingest-state.jsonl").to_path_buf(),
 ///   external_id: None,
+///   dry_run: false,
 /// };
 /// assert!(!cfg.force);
 /// ```
@@ -142,6 +143,9 @@ pub struct IngestConfig {
     pub ingest_state_path: PathBuf,
     /// Override external id (single-file ingest only).
     pub external_id: Option<String>,
+    /// Plan-only mode: resolve sources, validate, and emit a plan without running
+    /// the agent or writing the ledger.
+    pub dry_run: bool,
 }
 
 #[derive(Debug)]
@@ -307,6 +311,27 @@ fn is_already_ingested(
             }
         }
     })
+}
+
+/// Decide the dry-run plan action and a short reason string for a source.
+///
+/// Skip only when a matching success record exists and `--force` is not set;
+/// otherwise ingest. `has_external_id` distinguishes the skip reason between the
+/// authoritative external-id match and the content-identity fallback.
+fn plan_decision(
+    already_ingested: bool,
+    force: bool,
+    has_external_id: bool,
+) -> (PlanAction, &'static str) {
+    if already_ingested && !force {
+        if has_external_id {
+            (PlanAction::Skip, "already ingested (external_id)")
+        } else {
+            (PlanAction::Skip, "already ingested (content)")
+        }
+    } else {
+        (PlanAction::Ingest, "new source")
+    }
 }
 
 /// Extract `external_id` from a leading YAML frontmatter block (`---\n ... \n---`).
@@ -534,7 +559,7 @@ pub enum IngestFileOutcome {
 /// ```no_run
 /// # use std::path::Path;
 /// # use agwiki_core::ingest::{run_ingest_file, IngestConfig};
-/// let cfg = IngestConfig{ force: false, ingest_state_path: Path::new(".agwiki/ingest-state.jsonl").to_path_buf(), external_id: None };
+/// let cfg = IngestConfig{ force: false, ingest_state_path: Path::new(".agwiki/ingest-state.jsonl").to_path_buf(), external_id: None, dry_run: false };
 /// let _ = run_ingest_file(Path::new("."), Path::new("raw/note.md"), Path::new("ingest.md"), "codex", None, false, false, &cfg, &mut |_| {})?;
 /// # Ok::<(), anyhow::Error>(())
 /// ```
@@ -550,6 +575,52 @@ pub fn run_ingest_file(
     cfg: &IngestConfig,
     sink: &mut (dyn FnMut(IngestEvent) + Send),
 ) -> Result<IngestFileOutcome> {
+    // Dry-run: read-only ledger consult; no parent-dir creation, no write lock.
+    if cfg.dry_run {
+        let records = load_ingest_state(&cfg.ingest_state_path)?;
+        let policy_sha = ingest_policy_sha256(wiki_root)?;
+
+        let ingest_path = resolve_ingest_source(source_file)?;
+        let wiki_root_str = wiki_root.to_str().ok_or_else(|| {
+            anyhow::anyhow!(
+                "{CODE_INGEST_STATE_UTF8_PATH}: wiki root is not valid UTF-8: {}",
+                wiki_root.display()
+            )
+        })?;
+        let source_key = source_key_for(wiki_root, &ingest_path)?;
+        let content_sha = sha256_hex_file(&ingest_path)?;
+
+        // Flag overrides frontmatter for single-file ingest.
+        let external_id = match &cfg.external_id {
+            Some(id) => Some(id.clone()),
+            None => frontmatter_external_id(&ingest_path)?,
+        };
+
+        let already = is_already_ingested(
+            &records,
+            wiki_root_str,
+            &policy_sha,
+            &source_key,
+            &content_sha,
+            agent,
+            model,
+            external_id.as_deref(),
+        );
+        let (action, reason) = plan_decision(already, cfg.force, external_id.is_some());
+        sink(IngestEvent::Planned {
+            source_key,
+            action,
+            reason: reason.to_string(),
+            external_id,
+        });
+        // No work happened; map the planned action onto the outcome type. The CLI
+        // ignores this value in dry-run.
+        return Ok(match action {
+            PlanAction::Skip => IngestFileOutcome::Skipped,
+            PlanAction::Ingest => IngestFileOutcome::Ingested,
+        });
+    }
+
     if let Some(parent) = cfg.ingest_state_path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create ingest-state parent dir {}", parent.display()))?;
@@ -643,7 +714,7 @@ pub struct FolderIngestResultV2 {
 /// ```no_run
 /// # use std::path::Path;
 /// # use agwiki_core::ingest::{run_folder_ingest_batch, IngestConfig};
-/// let cfg = IngestConfig{ force: false, ingest_state_path: Path::new(".agwiki/ingest-state.jsonl").to_path_buf(), external_id: None };
+/// let cfg = IngestConfig{ force: false, ingest_state_path: Path::new(".agwiki/ingest-state.jsonl").to_path_buf(), external_id: None, dry_run: false };
 /// let _ = run_folder_ingest_batch(Path::new("."), Path::new("raw"), Path::new("ingest.md"), "codex", None, false, false, 0, &cfg, &mut |_| {})?;
 /// # Ok::<(), anyhow::Error>(())
 /// ```
@@ -729,18 +800,35 @@ pub fn run_folder_ingest_batch(
             }
         };
 
-        if !cfg.force
-            && is_already_ingested(
-                &records,
-                wiki_root_str,
-                &policy_sha,
-                &source_key,
-                &content_sha,
-                agent,
-                model,
-                external_id.as_deref(),
-            )
-        {
+        let already = is_already_ingested(
+            &records,
+            wiki_root_str,
+            &policy_sha,
+            &source_key,
+            &content_sha,
+            agent,
+            model,
+            external_id.as_deref(),
+        );
+
+        // Dry-run: emit a plan decision and run/append nothing. Count Skip as
+        // skipped and Ingest as succeeded for summary purposes.
+        if cfg.dry_run {
+            let (action, reason) = plan_decision(already, cfg.force, external_id.is_some());
+            match action {
+                PlanAction::Skip => skipped += 1,
+                PlanAction::Ingest => succeeded += 1,
+            }
+            sink(IngestEvent::Planned {
+                source_key,
+                action,
+                reason: reason.to_string(),
+                external_id,
+            });
+            continue;
+        }
+
+        if !cfg.force && already {
             skipped += 1;
             sink(IngestEvent::Skipped {
                 source_key: source_key.clone(),

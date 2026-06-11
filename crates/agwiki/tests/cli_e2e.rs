@@ -1510,6 +1510,137 @@ mod unix_tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn test_ingest_dry_run_plans_without_agent() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = PATH_MUTEX.lock().unwrap();
+        let stub_dir = tempdir()?;
+        make_stub_agent(stub_dir.path())?;
+
+        let wiki_tmp = tempdir()?;
+        let root = wiki_tmp.path();
+        setup_wiki(root)?;
+        let source_file = root.join("note.md");
+        fs::write(&source_file, "# Note\n")?;
+        let hits = root.join("hits.txt");
+
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var(
+            "PATH",
+            format!("{}:{}", stub_dir.path().display(), original_path),
+        );
+        let output = Command::cargo_bin("agwiki")
+            .unwrap()
+            .arg("ingest")
+            .arg("--wiki-root")
+            .arg(root)
+            .arg("-a")
+            .arg("codex")
+            .arg("--dry-run")
+            .arg(&source_file)
+            .env("AGWIKI_STUB_HITS", &hits)
+            .output();
+        std::env::set_var("PATH", original_path);
+        let output = output?;
+
+        assert!(
+            output.status.success(),
+            "dry-run failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("\"action\":\"ingest\""),
+            "expected planned ingest action, got: {stdout}"
+        );
+        assert_eq!(read_hits(&hits), 0, "agent must not run in dry-run");
+        assert!(
+            !root.join(".agwiki/ingest-state.jsonl").exists()
+                || fs::read_to_string(root.join(".agwiki/ingest-state.jsonl"))
+                    .map(|s| !s.contains("note.md"))
+                    .unwrap_or(true),
+            "dry-run must not write a ledger entry"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_ingest_dry_run_reports_skip() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = PATH_MUTEX.lock().unwrap();
+        let stub_dir = tempdir()?;
+        make_stub_agent(stub_dir.path())?;
+
+        let wiki_tmp = tempdir()?;
+        let root = wiki_tmp.path();
+        setup_wiki(root)?;
+        let source_file = root.join("note.md");
+        fs::write(&source_file, "# Note\n")?;
+        let hits = root.join("hits.txt");
+        let original_path = std::env::var("PATH").unwrap_or_default();
+
+        let first = run_ingest_with_file(
+            root,
+            stub_dir.path(),
+            &source_file,
+            "codex",
+            &[],
+            &[("AGWIKI_STUB_HITS", &hits)],
+            &original_path,
+        );
+        assert!(first.status.success(), "first ingest failed");
+        assert_eq!(read_hits(&hits), 1);
+
+        std::env::set_var(
+            "PATH",
+            format!("{}:{}", stub_dir.path().display(), original_path),
+        );
+        let output = Command::cargo_bin("agwiki")
+            .unwrap()
+            .arg("ingest")
+            .arg("--wiki-root")
+            .arg(root)
+            .arg("-a")
+            .arg("codex")
+            .arg("--dry-run")
+            .arg(&source_file)
+            .env("AGWIKI_STUB_HITS", &hits)
+            .output();
+        std::env::set_var("PATH", original_path);
+        let output = output?;
+
+        assert!(output.status.success(), "dry-run failed");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("\"action\":\"skip\""),
+            "expected planned skip, got: {stdout}"
+        );
+        assert_eq!(read_hits(&hits), 1, "agent must not run again in dry-run");
+        Ok(())
+    }
+
+    #[test]
+    fn test_ingest_dry_run_validation_error() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = PATH_MUTEX.lock().unwrap();
+        let wiki_tmp = tempdir()?;
+        let root = wiki_tmp.path();
+        setup_wiki(root)?;
+
+        let output = Command::cargo_bin("agwiki")
+            .unwrap()
+            .arg("ingest")
+            .arg("--wiki-root")
+            .arg(root)
+            .arg("-a")
+            .arg("codex")
+            .arg("--dry-run")
+            .arg(root.join("nonexistent.md"))
+            .output()?;
+        assert!(
+            !output.status.success(),
+            "dry-run with a missing source must exit non-zero"
+        );
+        Ok(())
+    }
 }
 
 #[test]

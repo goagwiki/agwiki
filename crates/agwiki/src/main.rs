@@ -164,6 +164,7 @@ pub struct IngestArgs {
     pub force: bool,
     pub ingest_state: Option<PathBuf>,
     pub external_id: Option<String>,
+    pub dry_run: bool,
 }
 
 impl IntoCommandSpec for IngestArgs {
@@ -295,6 +296,14 @@ impl IntoCommandSpec for IngestArgs {
                     help: "Path to the ingest-state JSONL ledger (default: <wiki-root>/.agwiki/ingest-state.jsonl)",
                     ..Default::default()
                 },
+                ArgSpec {
+                    name: "dry-run",
+                    kind: ArgKind::Flag,
+                    value_type: ArgValueType::Bool,
+                    cardinality: Cardinality::Optional,
+                    help: "Resolve and plan sources without running the agent or writing the ledger; emits a JSON plan on stdout",
+                    ..Default::default()
+                },
             ],
             ..Default::default()
         }
@@ -385,6 +394,7 @@ impl FromArgValueMap for IngestArgs {
                     }
                 })
                 .filter(|s| !s.trim().is_empty()),
+            dry_run: matches!(map.get("dry-run"), Some(ArgValue::Bool(true))),
         }
     }
 }
@@ -424,6 +434,7 @@ async fn execute_ingest(args: IngestArgs) -> Result<()> {
         force: do_force,
         ingest_state_path: resolve_ingest_state_path(&root, args.ingest_state)?,
         external_id: args.external_id,
+        dry_run: args.dry_run,
     };
 
     let file = args.file;
