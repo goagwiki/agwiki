@@ -69,7 +69,8 @@ fn test_export_skill_dry_run() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(root.join("skill/SKILL.md"), "# Skill\n")?;
 
     let mut cmd = Command::cargo_bin("agwiki")?;
-    cmd.arg("export")
+    cmd.arg("materialize")
+        .arg("--target")
         .arg("skill")
         .arg("--wiki-root")
         .arg(root)

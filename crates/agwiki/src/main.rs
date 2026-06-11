@@ -597,76 +597,6 @@ async fn execute_new(args: NewArgs) -> Result<()> {
     Ok(())
 }
 
-// ── compile ───────────────────────────────────────────────────────────────────
-
-pub struct CompileArgs {
-    pub wiki_root: Option<PathBuf>,
-    pub dry_run: bool,
-}
-
-impl IntoCommandSpec for CompileArgs {
-    fn command_spec() -> CommandSpec {
-        CommandSpec {
-            summary: "Validate content sources and render generated markdown into wiki/",
-            syntax: Some("compile [--dry-run]"),
-            category: Some("build"),
-            examples: vec!["agwiki compile", "agwiki compile --dry-run"],
-            exit_codes: vec![
-                cli_framework::spec::command_tree::ExitCodeEntry {
-                    code: 0,
-                    description: "Success",
-                },
-                cli_framework::spec::command_tree::ExitCodeEntry {
-                    code: 1,
-                    description: "Compile errors found",
-                },
-            ],
-            args: vec![
-                wiki_root_arg(),
-                ArgSpec {
-                    name: "dry-run",
-                    kind: ArgKind::Flag,
-                    value_type: ArgValueType::Bool,
-                    cardinality: Cardinality::Optional,
-                    help: "Validate and print planned writes without changing files",
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        }
-    }
-}
-
-impl FromArgValueMap for CompileArgs {
-    fn from_arg_value_map(map: &HashMap<String, ArgValue>) -> Self {
-        Self {
-            wiki_root: map
-                .get("wiki-root")
-                .and_then(|v| {
-                    if let ArgValue::Str(s) = v {
-                        Some(s.clone())
-                    } else {
-                        None
-                    }
-                })
-                .map(PathBuf::from),
-            dry_run: matches!(map.get("dry-run"), Some(ArgValue::Bool(true))),
-        }
-    }
-}
-
-async fn execute_compile(args: CompileArgs) -> Result<()> {
-    let root = resolve_root(args.wiki_root)?;
-    let report = run_compile(CompileOptions {
-        wiki_root: root,
-        dry_run: args.dry_run,
-    })?;
-    if !report.errors.is_empty() {
-        std::process::exit(1);
-    }
-    Ok(())
-}
-
 // ── serve ─────────────────────────────────────────────────────────────────────
 
 pub struct ServeArgs {
@@ -774,52 +704,79 @@ async fn execute_serve(args: ServeArgs) -> Result<()> {
     Ok(())
 }
 
-// ── export ────────────────────────────────────────────────────────────────────
+// ── materialize ─────────────────────────────────────────────────────────────────
 
-pub struct ExportArgs {
-    pub subcommand: String,
+pub struct MaterializeArgs {
+    pub target: String,
     pub wiki_root: Option<PathBuf>,
+    pub dry_run: bool,
     pub skill_root: Option<PathBuf>,
     pub skill_md: Option<PathBuf>,
-    pub dry_run: bool,
     pub prune: bool,
     pub out: Option<String>,
 }
 
-impl IntoCommandSpec for ExportArgs {
+impl IntoCommandSpec for MaterializeArgs {
     fn command_spec() -> CommandSpec {
         CommandSpec {
-            summary: "Publish/export workflows: export skill or export html",
-            syntax: Some("export <skill|html> [options]"),
-            category: Some("export"),
+            summary: "Render the content model into a concrete target layout (wiki, skill, or html)",
+            syntax: Some("materialize --target <wiki|skill|html> [options]"),
+            category: Some("materialize"),
             long_about: Some(
-                "Subcommands: skill — mirror wiki/ into the skill bundle; html — static HTML export.",
+                "Materialize renders the content model into a concrete target and is agnostic \
+                 to who consumes it. It subsumes the former compile / export skill / export html \
+                 commands into one verb; the wiki is just one target, no longer privileged.\n\n\
+                 Targets:\n  \
+                 wiki  — validate content sources and render generated markdown into wiki/ \
+                 (the former `compile`). Honors --dry-run.\n  \
+                 skill — mirror wiki/ into the Agent Skill bundle under skill/references/ and \
+                 update SKILL.md (the former `export skill`). Honors --dry-run, --skill-root, \
+                 --skill-md, --prune.\n  \
+                 html  — static HTML export of the wiki (the former `export html`). Honors --out.\n\n\
+                 --target is required and has no default: pass one of wiki, skill, or html. \
+                 Target-specific flags are rejected when used with the wrong target.",
             ),
             examples: vec![
-                "agwiki export skill",
-                "agwiki export skill --prune",
-                "agwiki export skill --dry-run",
+                "agwiki materialize --target wiki",
+                "agwiki materialize --target wiki --dry-run",
+                "agwiki materialize --target skill --prune",
+                "agwiki materialize --target skill --dry-run",
+                "agwiki materialize --target html --out dist/html",
             ],
-            exit_codes: vec![cli_framework::spec::command_tree::ExitCodeEntry {
-                code: 0,
-                description: "Success",
-            }],
+            exit_codes: vec![
+                cli_framework::spec::command_tree::ExitCodeEntry {
+                    code: 0,
+                    description: "Success",
+                },
+                cli_framework::spec::command_tree::ExitCodeEntry {
+                    code: 1,
+                    description: "Unknown/missing target, flag misuse, or materialize errors",
+                },
+            ],
             args: vec![
                 ArgSpec {
-                    name: "subcommand",
-                    kind: ArgKind::Positional,
-                    value_type: ArgValueType::Enum(vec!["skill", "html"]),
+                    name: "target",
+                    kind: ArgKind::Option,
+                    value_type: ArgValueType::String,
                     cardinality: Cardinality::Required,
-                    help: "Export subcommand: skill or html",
+                    help: "Target layout to render: wiki, skill, or html (required; no default)",
                     ..Default::default()
                 },
                 wiki_root_arg(),
+                ArgSpec {
+                    name: "dry-run",
+                    kind: ArgKind::Flag,
+                    value_type: ArgValueType::Bool,
+                    cardinality: Cardinality::Optional,
+                    help: "wiki/skill only: validate and print planned writes without changing files",
+                    ..Default::default()
+                },
                 ArgSpec {
                     name: "skill-root",
                     kind: ArgKind::Option,
                     value_type: ArgValueType::String,
                     cardinality: Cardinality::Optional,
-                    help: "Agent Skill directory (default: <wiki-root>/skill)",
+                    help: "skill only: Agent Skill directory (default: <wiki-root>/skill)",
                     ..Default::default()
                 },
                 ArgSpec {
@@ -827,15 +784,7 @@ impl IntoCommandSpec for ExportArgs {
                     kind: ArgKind::Option,
                     value_type: ArgValueType::String,
                     cardinality: Cardinality::Optional,
-                    help: "SKILL.md path to create or update (default: <skill-root>/SKILL.md)",
-                    ..Default::default()
-                },
-                ArgSpec {
-                    name: "dry-run",
-                    kind: ArgKind::Flag,
-                    value_type: ArgValueType::Bool,
-                    cardinality: Cardinality::Optional,
-                    help: "Print planned copies/prunes and generated index; do not write files",
+                    help: "skill only: SKILL.md path to create or update (default: <skill-root>/SKILL.md)",
                     ..Default::default()
                 },
                 ArgSpec {
@@ -843,7 +792,7 @@ impl IntoCommandSpec for ExportArgs {
                     kind: ArgKind::Flag,
                     value_type: ArgValueType::Bool,
                     cardinality: Cardinality::Optional,
-                    help: "Remove files under skill/references/ when the source .md no longer exists",
+                    help: "skill only: remove files under skill/references/ when the source .md no longer exists",
                     ..Default::default()
                 },
                 ArgSpec {
@@ -851,7 +800,7 @@ impl IntoCommandSpec for ExportArgs {
                     kind: ArgKind::Option,
                     value_type: ArgValueType::String,
                     cardinality: Cardinality::Optional,
-                    help: "Output directory for static HTML export (default: dist/html)",
+                    help: "html only: output directory for static HTML export (default: dist/html)",
                     ..Default::default()
                 },
             ],
@@ -860,17 +809,17 @@ impl IntoCommandSpec for ExportArgs {
     }
 }
 
-impl FromArgValueMap for ExportArgs {
+impl FromArgValueMap for MaterializeArgs {
     fn from_arg_value_map(map: &HashMap<String, ArgValue>) -> Self {
         Self {
-            subcommand: map
-                .get("subcommand")
+            target: map
+                .get("target")
                 .and_then(|v| match v {
                     ArgValue::Str(s) => Some(s.clone()),
                     ArgValue::Enum(s) => Some(s.clone()),
                     _ => None,
                 })
-                .unwrap_or_else(|| panic!("fw bug: missing subcommand")),
+                .unwrap_or_default(),
             wiki_root: map
                 .get("wiki-root")
                 .and_then(|v| {
@@ -881,6 +830,7 @@ impl FromArgValueMap for ExportArgs {
                     }
                 })
                 .map(PathBuf::from),
+            dry_run: matches!(map.get("dry-run"), Some(ArgValue::Bool(true))),
             skill_root: map
                 .get("skill-root")
                 .and_then(|v| {
@@ -901,7 +851,6 @@ impl FromArgValueMap for ExportArgs {
                     }
                 })
                 .map(PathBuf::from),
-            dry_run: matches!(map.get("dry-run"), Some(ArgValue::Bool(true))),
             prune: matches!(map.get("prune"), Some(ArgValue::Bool(true))),
             out: map.get("out").and_then(|v| {
                 if let ArgValue::Str(s) = v {
@@ -914,9 +863,28 @@ impl FromArgValueMap for ExportArgs {
     }
 }
 
-async fn execute_export(args: ExportArgs) -> Result<()> {
-    match args.subcommand.as_str() {
+async fn execute_materialize(args: MaterializeArgs) -> Result<()> {
+    match args.target.as_str() {
+        "wiki" => {
+            if args.skill_root.is_some() || args.skill_md.is_some() || args.prune {
+                anyhow::bail!("--skill-root/--skill-md/--prune are only valid with --target skill");
+            }
+            if args.out.is_some() {
+                anyhow::bail!("--out is only valid with --target html");
+            }
+            let root = resolve_root(args.wiki_root)?;
+            let report = run_compile(CompileOptions {
+                wiki_root: root,
+                dry_run: args.dry_run,
+            })?;
+            if !report.errors.is_empty() {
+                std::process::exit(1);
+            }
+        }
         "skill" => {
+            if args.out.is_some() {
+                anyhow::bail!("--out is only valid with --target html");
+            }
             let root = resolve_wiki_root(args.wiki_root)?;
             run_export(ExportOptions {
                 wiki_root: &root,
@@ -927,6 +895,9 @@ async fn execute_export(args: ExportArgs) -> Result<()> {
             })?;
         }
         "html" => {
+            if args.skill_root.is_some() || args.skill_md.is_some() || args.prune {
+                anyhow::bail!("--skill-root/--skill-md/--prune are only valid with --target skill");
+            }
             let root = resolve_root(args.wiki_root)?;
             let out_str = args.out.as_deref().unwrap_or("dist/html");
             let out = PathBuf::from(out_str);
@@ -937,10 +908,14 @@ async fn execute_export(args: ExportArgs) -> Result<()> {
             };
             run_export_html(&root, &out_dir)?;
         }
-        _ => anyhow::bail!(
-            "unknown subcommand '{}': expected 'skill' or 'html'",
-            args.subcommand
-        ),
+        other => {
+            let label = if other.is_empty() {
+                "missing".to_string()
+            } else {
+                format!("'{other}'")
+            };
+            anyhow::bail!("unknown --target {label}: expected one of wiki, skill, or html");
+        }
     }
     Ok(())
 }
@@ -1079,14 +1054,11 @@ async fn main() -> anyhow::Result<()> {
             path!["new"],
             |_ctx, args| async move { execute_new(args).await },
         )?
-        .register::<CompileArgs, _, _>(path!["compile"], |_ctx, args| async move {
-            execute_compile(args).await
-        })?
         .register::<ServeArgs, _, _>(path!["serve"], |_ctx, args| async move {
             execute_serve(args).await
         })?
-        .register::<ExportArgs, _, _>(path!["export"], |_ctx, args| async move {
-            execute_export(args).await
+        .register::<MaterializeArgs, _, _>(path!["materialize"], |_ctx, args| async move {
+            execute_materialize(args).await
         })?
         .register::<CheckArgs, _, _>(path!["check"], |_ctx, args| async move {
             execute_check(args).await
