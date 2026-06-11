@@ -545,6 +545,30 @@ pub enum IngestFileOutcome {
     Skipped,
 }
 
+/// Result of a single-file ingest, carrying the source identity the caller needs
+/// for downstream work (e.g. CLI lifecycle hooks). This is pure data: core does
+/// not act on it.
+///
+/// Example:
+/// ```no_run
+/// # use agwiki_core::ingest::{IngestFileResult, IngestFileOutcome};
+/// let r = IngestFileResult {
+///   outcome: IngestFileOutcome::Ingested,
+///   source_key: "raw/note.md".to_string(),
+///   external_id: Some("vid-123".to_string()),
+/// };
+/// assert_eq!(r.source_key, "raw/note.md");
+/// ```
+#[derive(Debug, Clone)]
+pub struct IngestFileResult {
+    /// Whether the file was ingested or skipped.
+    pub outcome: IngestFileOutcome,
+    /// Stable source identity key for this file.
+    pub source_key: String,
+    /// Resolved external id (flag override or frontmatter), if any.
+    pub external_id: Option<String>,
+}
+
 /// Run a single-file ingest with always-on ledger idempotency.
 ///
 /// The ledger is always consulted and written. A source is skipped when a prior
@@ -560,7 +584,8 @@ pub enum IngestFileOutcome {
 /// # use std::path::Path;
 /// # use agwiki_core::ingest::{run_ingest_file, IngestConfig};
 /// let cfg = IngestConfig{ force: false, ingest_state_path: Path::new(".agwiki/ingest-state.jsonl").to_path_buf(), external_id: None, dry_run: false };
-/// let _ = run_ingest_file(Path::new("."), Path::new("raw/note.md"), Path::new("ingest.md"), "codex", None, false, false, &cfg, &mut |_| {})?;
+/// let r = run_ingest_file(Path::new("."), Path::new("raw/note.md"), Path::new("ingest.md"), "codex", None, false, false, &cfg, &mut |_| {})?;
+/// let _ = r.source_key;
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 #[allow(clippy::too_many_arguments)]
@@ -574,7 +599,7 @@ pub fn run_ingest_file(
     progress: bool,
     cfg: &IngestConfig,
     sink: &mut (dyn FnMut(IngestEvent) + Send),
-) -> Result<IngestFileOutcome> {
+) -> Result<IngestFileResult> {
     // Dry-run: read-only ledger consult; no parent-dir creation, no write lock.
     if cfg.dry_run {
         let records = load_ingest_state(&cfg.ingest_state_path)?;
@@ -608,16 +633,21 @@ pub fn run_ingest_file(
         );
         let (action, reason) = plan_decision(already, cfg.force, external_id.is_some());
         sink(IngestEvent::Planned {
-            source_key,
+            source_key: source_key.clone(),
             action,
             reason: reason.to_string(),
-            external_id,
+            external_id: external_id.clone(),
         });
         // No work happened; map the planned action onto the outcome type. The CLI
         // ignores this value in dry-run.
-        return Ok(match action {
+        let outcome = match action {
             PlanAction::Skip => IngestFileOutcome::Skipped,
             PlanAction::Ingest => IngestFileOutcome::Ingested,
+        };
+        return Ok(IngestFileResult {
+            outcome,
+            source_key,
+            external_id,
         });
     }
 
@@ -661,7 +691,11 @@ pub fn run_ingest_file(
         sink(IngestEvent::Skipped {
             source_key: source_key.clone(),
         });
-        return Ok(IngestFileOutcome::Skipped);
+        return Ok(IngestFileResult {
+            outcome: IngestFileOutcome::Skipped,
+            source_key,
+            external_id,
+        });
     }
 
     let prompt = expand_ingest_prompt(wiki_root, &ingest_path, prompt_path)?;
@@ -674,25 +708,50 @@ pub fn run_ingest_file(
         schema_version: 2,
         status: IngestStatus::Success,
         wiki_root: wiki_root_str.to_string(),
-        source_key,
+        source_key: source_key.clone(),
         content_sha256: content_sha,
         ingest_policy_sha256: policy_sha,
         agent: agent.to_string(),
         model: model.map(|s| s.to_string()),
-        external_id,
+        external_id: external_id.clone(),
         completed_at,
         agwiki_version: env!("CARGO_PKG_VERSION").to_string(),
     };
     append_ingest_success(&cfg.ingest_state_path, &record)?;
-    Ok(IngestFileOutcome::Ingested)
+    Ok(IngestFileResult {
+        outcome: IngestFileOutcome::Ingested,
+        source_key,
+        external_id,
+    })
+}
+
+/// Identity of one source actually ingested in a batch (pure data for callers
+/// such as CLI lifecycle hooks). Pushed only for files that ran the agent — not
+/// for skipped or dry-run-planned files.
+///
+/// Example:
+/// ```no_run
+/// # use agwiki_core::ingest::IngestedSource;
+/// let s = IngestedSource { source_key: "raw/a.md".to_string(), external_id: None };
+/// assert_eq!(s.source_key, "raw/a.md");
+/// ```
+#[derive(Debug, Clone)]
+pub struct IngestedSource {
+    /// Stable source identity key.
+    pub source_key: String,
+    /// Resolved external id (frontmatter), if any.
+    pub external_id: Option<String>,
 }
 
 /// Folder ingest summary with resume support.
 ///
+/// `ingested` lists one [`IngestedSource`] per file that actually ran the agent
+/// (skipped and dry-run-planned files are excluded).
+///
 /// Example:
 /// ```no_run
 /// # use agwiki_core::ingest::FolderIngestResultV2;
-/// let r = FolderIngestResultV2 { total: 2, succeeded: 1, skipped: 1, failures: vec![] };
+/// let r = FolderIngestResultV2 { total: 2, succeeded: 1, skipped: 1, failures: vec![], ingested: vec![] };
 /// assert_eq!(r.skipped, 1);
 /// ```
 #[derive(Debug)]
@@ -701,6 +760,7 @@ pub struct FolderIngestResultV2 {
     pub succeeded: usize,
     pub skipped: usize,
     pub failures: Vec<(PathBuf, String)>,
+    pub ingested: Vec<IngestedSource>,
 }
 
 /// Run a batch folder ingest with always-on ledger idempotency and return a
@@ -762,6 +822,7 @@ pub fn run_folder_ingest_batch(
     })?;
 
     let mut failures: Vec<(PathBuf, String)> = Vec::new();
+    let mut ingested: Vec<IngestedSource> = Vec::new();
     let mut skipped = 0usize;
     let mut succeeded = 0usize;
     let mut files_processed = 0usize;
@@ -863,12 +924,12 @@ pub fn run_folder_ingest_batch(
             schema_version: 2,
             status: IngestStatus::Success,
             wiki_root: wiki_root_str.to_string(),
-            source_key,
+            source_key: source_key.clone(),
             content_sha256: content_sha,
             ingest_policy_sha256: policy_sha.clone(),
             agent: agent.to_string(),
             model: model.map(|s| s.to_string()),
-            external_id,
+            external_id: external_id.clone(),
             completed_at,
             agwiki_version: env!("CARGO_PKG_VERSION").to_string(),
         };
@@ -878,6 +939,10 @@ pub fn run_folder_ingest_batch(
             continue;
         }
         records.push(record);
+        ingested.push(IngestedSource {
+            source_key,
+            external_id,
+        });
         succeeded += 1;
     }
 
@@ -890,6 +955,7 @@ pub fn run_folder_ingest_batch(
         succeeded,
         skipped,
         failures,
+        ingested,
     })
 }
 

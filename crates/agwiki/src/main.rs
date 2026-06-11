@@ -440,6 +440,13 @@ async fn execute_ingest(args: IngestArgs) -> Result<()> {
     let file = args.file;
     let folder = args.folder;
     let max_files = args.max_files;
+    let dry_run = args.dry_run;
+
+    // Hooks are a CLI-only concern (ADR 0002): core never runs them. They are
+    // never run in --dry-run.
+    let hooks = &op_cfg.hooks;
+    let coe = hooks.continue_on_error;
+    let wiki_root_str = root.display().to_string();
 
     let mut renderer = IngestRenderer::new(do_progress);
 
@@ -447,7 +454,7 @@ async fn execute_ingest(args: IngestArgs) -> Result<()> {
         (Some(file), None) => {
             let prompt_path = require_wiki_ingest_prompt(&root)?;
             let mut sink = renderer.sink();
-            run_ingest_file(
+            let result = run_ingest_file(
                 &root,
                 &file,
                 &prompt_path,
@@ -457,7 +464,46 @@ async fn execute_ingest(args: IngestArgs) -> Result<()> {
                 do_progress,
                 &cfg,
                 &mut sink,
-            )?;
+            );
+            drop(sink);
+
+            let result = match result {
+                Ok(r) => r,
+                Err(e) => {
+                    if !dry_run {
+                        let abs_source = file
+                            .canonicalize()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|_| file.display().to_string());
+                        let env = vec![
+                            ("AGWIKI_WIKI_ROOT", wiki_root_str.clone()),
+                            ("AGWIKI_SOURCE", abs_source),
+                            ("AGWIKI_ERROR", e.to_string()),
+                        ];
+                        agwiki::hooks::run_hook_if_set(&hooks.on_error, &root, &env, coe)?;
+                    }
+                    return Err(e);
+                }
+            };
+
+            if !dry_run && result.outcome == agwiki_core::ingest::IngestFileOutcome::Ingested {
+                let abs_source = file
+                    .canonicalize()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| file.display().to_string());
+                let env = vec![
+                    ("AGWIKI_WIKI_ROOT", wiki_root_str.clone()),
+                    ("AGWIKI_SOURCE", abs_source),
+                    ("AGWIKI_SOURCE_KEY", result.source_key.clone()),
+                    (
+                        "AGWIKI_EXTERNAL_ID",
+                        result.external_id.clone().unwrap_or_default(),
+                    ),
+                    ("AGWIKI_AGENT", agent.to_string()),
+                    ("AGWIKI_MODEL", model.clone().unwrap_or_default()),
+                ];
+                agwiki::hooks::run_hook_if_set(&hooks.after_source, &root, &env, coe)?;
+            }
         }
         (None, Some(folder)) => {
             let prompt_path = require_wiki_ingest_prompt(&root)?;
@@ -475,6 +521,47 @@ async fn execute_ingest(args: IngestArgs) -> Result<()> {
                 &mut sink,
             )?;
             drop(sink);
+
+            if !dry_run {
+                // after_source: once per file that actually ingested.
+                for src in &result.ingested {
+                    let env = vec![
+                        ("AGWIKI_WIKI_ROOT", wiki_root_str.clone()),
+                        (
+                            "AGWIKI_SOURCE",
+                            root.join(&src.source_key).display().to_string(),
+                        ),
+                        ("AGWIKI_SOURCE_KEY", src.source_key.clone()),
+                        (
+                            "AGWIKI_EXTERNAL_ID",
+                            src.external_id.clone().unwrap_or_default(),
+                        ),
+                        ("AGWIKI_AGENT", agent.to_string()),
+                        ("AGWIKI_MODEL", model.clone().unwrap_or_default()),
+                    ];
+                    agwiki::hooks::run_hook_if_set(&hooks.after_source, &root, &env, coe)?;
+                }
+
+                // on_error: once per failed file.
+                for (path, err) in &result.failures {
+                    let env = vec![
+                        ("AGWIKI_WIKI_ROOT", wiki_root_str.clone()),
+                        ("AGWIKI_SOURCE", path.display().to_string()),
+                        ("AGWIKI_ERROR", err.clone()),
+                    ];
+                    agwiki::hooks::run_hook_if_set(&hooks.on_error, &root, &env, coe)?;
+                }
+
+                // after_batch: once after the batch completes, before exit(1).
+                let env = vec![
+                    ("AGWIKI_WIKI_ROOT", wiki_root_str.clone()),
+                    ("AGWIKI_INGESTED", result.succeeded.to_string()),
+                    ("AGWIKI_SKIPPED", result.skipped.to_string()),
+                    ("AGWIKI_FAILED", result.failures.len().to_string()),
+                ];
+                agwiki::hooks::run_hook_if_set(&hooks.after_batch, &root, &env, coe)?;
+            }
+
             eprintln!(
                 "Batch ingest: {} total, {} succeeded, {} skipped, {} failed.",
                 result.total,
@@ -864,7 +951,8 @@ impl FromArgValueMap for MaterializeArgs {
 }
 
 async fn execute_materialize(args: MaterializeArgs) -> Result<()> {
-    match args.target.as_str() {
+    // Resolved wiki root for the after_materialize hook (yielded by each arm).
+    let root: PathBuf = match args.target.as_str() {
         "wiki" => {
             if args.skill_root.is_some() || args.skill_md.is_some() || args.prune {
                 anyhow::bail!("--skill-root/--skill-md/--prune are only valid with --target skill");
@@ -874,12 +962,13 @@ async fn execute_materialize(args: MaterializeArgs) -> Result<()> {
             }
             let root = resolve_root(args.wiki_root)?;
             let report = run_compile(CompileOptions {
-                wiki_root: root,
+                wiki_root: root.clone(),
                 dry_run: args.dry_run,
             })?;
             if !report.errors.is_empty() {
                 std::process::exit(1);
             }
+            root
         }
         "skill" => {
             if args.out.is_some() {
@@ -893,6 +982,7 @@ async fn execute_materialize(args: MaterializeArgs) -> Result<()> {
                 dry_run: args.dry_run,
                 prune: args.prune,
             })?;
+            root
         }
         "html" => {
             if args.skill_root.is_some() || args.skill_md.is_some() || args.prune {
@@ -907,6 +997,7 @@ async fn execute_materialize(args: MaterializeArgs) -> Result<()> {
                 root.join(out)
             };
             run_export_html(&root, &out_dir)?;
+            root
         }
         other => {
             let label = if other.is_empty() {
@@ -916,7 +1007,22 @@ async fn execute_materialize(args: MaterializeArgs) -> Result<()> {
             };
             anyhow::bail!("unknown --target {label}: expected one of wiki, skill, or html");
         }
-    }
+    };
+
+    // after_materialize: run once the target render succeeds. Hooks are CLI-only
+    // (ADR 0002); loaded from the resolved wiki root's .agwiki/config.toml.
+    let op_cfg = agwiki::config::OperatorConfig::load(&root)?;
+    let env = vec![
+        ("AGWIKI_WIKI_ROOT", root.display().to_string()),
+        ("AGWIKI_TARGET", args.target.clone()),
+    ];
+    agwiki::hooks::run_hook_if_set(
+        &op_cfg.hooks.after_materialize,
+        &root,
+        &env,
+        op_cfg.hooks.continue_on_error,
+    )?;
+
     Ok(())
 }
 

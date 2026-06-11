@@ -1642,6 +1642,188 @@ mod unix_tests {
         );
         Ok(())
     }
+
+    // ── lifecycle hooks (Step 6) ──────────────────────────────────────────────
+
+    fn write_hooks_config(
+        root: &std::path::Path,
+        body: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        fs::create_dir_all(root.join(".agwiki"))?;
+        fs::write(root.join(".agwiki/config.toml"), body)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_hook_after_source_runs() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = PATH_MUTEX.lock().unwrap();
+        let stub_dir = tempdir()?;
+        make_stub_agent(stub_dir.path())?;
+
+        let wiki_tmp = tempdir()?;
+        let root = wiki_tmp.path();
+        setup_wiki(root)?;
+        write_hooks_config(root, "[hooks]\nafter_source = \"touch fired.txt\"\n")?;
+
+        let source_file = root.join("note.md");
+        fs::write(&source_file, "# Note\n")?;
+        let original_path = std::env::var("PATH").unwrap_or_default();
+
+        let out = run_ingest_with_file(
+            root,
+            stub_dir.path(),
+            &source_file,
+            "codex",
+            &[],
+            &[],
+            &original_path,
+        );
+        assert!(
+            out.status.success(),
+            "ingest failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            root.join("fired.txt").exists(),
+            "expected after_source hook to create fired.txt"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_hook_after_materialize_runs() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = PATH_MUTEX.lock().unwrap();
+        let wiki_tmp = tempdir()?;
+        let root = wiki_tmp.path();
+        // materialize --target wiki needs a full wiki root (agwiki.toml + tree).
+        Command::cargo_bin("agwiki")
+            .unwrap()
+            .arg("init")
+            .arg(root)
+            .output()?;
+        write_hooks_config(root, "[hooks]\nafter_materialize = \"touch mat.txt\"\n")?;
+
+        let output = Command::cargo_bin("agwiki")
+            .unwrap()
+            .arg("materialize")
+            .arg("--target")
+            .arg("wiki")
+            .arg("--wiki-root")
+            .arg(root)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "materialize failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            root.join("mat.txt").exists(),
+            "expected after_materialize hook to create mat.txt"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_hook_failure_fails_command() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = PATH_MUTEX.lock().unwrap();
+        let stub_dir = tempdir()?;
+        make_stub_agent(stub_dir.path())?;
+
+        let wiki_tmp = tempdir()?;
+        let root = wiki_tmp.path();
+        setup_wiki(root)?;
+        write_hooks_config(root, "[hooks]\nafter_source = \"exit 7\"\n")?;
+
+        let source_file = root.join("note.md");
+        fs::write(&source_file, "# Note\n")?;
+        let original_path = std::env::var("PATH").unwrap_or_default();
+
+        let out = run_ingest_with_file(
+            root,
+            stub_dir.path(),
+            &source_file,
+            "codex",
+            &[],
+            &[],
+            &original_path,
+        );
+        assert!(
+            !out.status.success(),
+            "expected a failing after_source hook to fail the command"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_hook_continue_on_error_tolerates() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = PATH_MUTEX.lock().unwrap();
+        let stub_dir = tempdir()?;
+        make_stub_agent(stub_dir.path())?;
+
+        let wiki_tmp = tempdir()?;
+        let root = wiki_tmp.path();
+        setup_wiki(root)?;
+        write_hooks_config(
+            root,
+            "[hooks]\nafter_source = \"exit 7\"\ncontinue_on_error = true\n",
+        )?;
+
+        let source_file = root.join("note.md");
+        fs::write(&source_file, "# Note\n")?;
+        let original_path = std::env::var("PATH").unwrap_or_default();
+
+        let out = run_ingest_with_file(
+            root,
+            stub_dir.path(),
+            &source_file,
+            "codex",
+            &[],
+            &[],
+            &original_path,
+        );
+        assert!(
+            out.status.success(),
+            "expected continue_on_error to tolerate the failing hook: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_hook_dry_run_skips_hooks() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = PATH_MUTEX.lock().unwrap();
+        let stub_dir = tempdir()?;
+        make_stub_agent(stub_dir.path())?;
+
+        let wiki_tmp = tempdir()?;
+        let root = wiki_tmp.path();
+        setup_wiki(root)?;
+        write_hooks_config(root, "[hooks]\nafter_source = \"touch fired.txt\"\n")?;
+
+        let source_file = root.join("note.md");
+        fs::write(&source_file, "# Note\n")?;
+        let original_path = std::env::var("PATH").unwrap_or_default();
+
+        let out = run_ingest_with_file(
+            root,
+            stub_dir.path(),
+            &source_file,
+            "codex",
+            &["--dry-run"],
+            &[],
+            &original_path,
+        );
+        assert!(
+            out.status.success(),
+            "dry-run failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !root.join("fired.txt").exists(),
+            "expected --dry-run to skip after_source hook"
+        );
+        Ok(())
+    }
 }
 
 #[test]
