@@ -22,6 +22,8 @@ use serde::Deserialize;
 pub struct OperatorConfig {
     #[serde(default)]
     pub defaults: Defaults,
+    #[serde(default)]
+    pub hooks: Hooks,
 }
 
 /// Default flag values for commands that accept an agent/model.
@@ -31,6 +33,28 @@ pub struct Defaults {
     pub agent: Option<String>,
     /// Default model for `ingest` when `-m` and `AGWIKI_MODEL` are both absent.
     pub model: Option<String>,
+}
+
+/// Operator lifecycle hooks — shell commands run at ingest/materialize points.
+///
+/// This is a **CLI-only** concern: `agwiki-core` never runs or reads hooks. Each
+/// hook is an optional `sh -c` command string. Absent `[hooks]` leaves every field
+/// `None` and `continue_on_error` `false`.
+#[derive(Debug, Default, Deserialize)]
+pub struct Hooks {
+    /// Run after each source is ingested (single-file `Ingested`, or once per
+    /// ingested file in folder mode). Skipped sources do not fire it.
+    pub after_source: Option<String>,
+    /// Run once after a folder ingest batch completes.
+    pub after_batch: Option<String>,
+    /// Run after a `materialize` target render succeeds.
+    pub after_materialize: Option<String>,
+    /// Run when an ingest errors (single-file error, or once per folder failure).
+    pub on_error: Option<String>,
+    /// When `true`, a non-zero hook exit is warned on stderr instead of failing the
+    /// command.
+    #[serde(default)]
+    pub continue_on_error: bool,
 }
 
 impl OperatorConfig {
@@ -118,6 +142,45 @@ mod tests {
         let cfg = OperatorConfig::load(dir.path()).unwrap();
         assert_eq!(cfg.defaults.agent.as_deref(), Some("codex"));
         assert_eq!(cfg.defaults.model.as_deref(), Some("gpt-5"));
+    }
+
+    #[test]
+    fn load_hooks_absent_are_all_none() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".agwiki")).unwrap();
+        fs::write(
+            dir.path().join(".agwiki/config.toml"),
+            "[defaults]\nagent = \"codex\"\n",
+        )
+        .unwrap();
+        let cfg = OperatorConfig::load(dir.path()).unwrap();
+        assert!(cfg.hooks.after_source.is_none());
+        assert!(cfg.hooks.after_batch.is_none());
+        assert!(cfg.hooks.after_materialize.is_none());
+        assert!(cfg.hooks.on_error.is_none());
+        assert!(!cfg.hooks.continue_on_error);
+    }
+
+    #[test]
+    fn load_reads_hooks() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".agwiki")).unwrap();
+        fs::write(
+            dir.path().join(".agwiki/config.toml"),
+            "[hooks]\n\
+             after_source = \"echo source\"\n\
+             after_batch = \"echo batch\"\n\
+             after_materialize = \"echo mat\"\n\
+             on_error = \"echo err\"\n\
+             continue_on_error = true\n",
+        )
+        .unwrap();
+        let cfg = OperatorConfig::load(dir.path()).unwrap();
+        assert_eq!(cfg.hooks.after_source.as_deref(), Some("echo source"));
+        assert_eq!(cfg.hooks.after_batch.as_deref(), Some("echo batch"));
+        assert_eq!(cfg.hooks.after_materialize.as_deref(), Some("echo mat"));
+        assert_eq!(cfg.hooks.on_error.as_deref(), Some("echo err"));
+        assert!(cfg.hooks.continue_on_error);
     }
 
     #[test]

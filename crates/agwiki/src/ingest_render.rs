@@ -9,11 +9,11 @@
 //!   footer flushed at the end of each agent run and `--- <key> ---` separators between
 //!   files in folder mode.
 //!
-//! Skip notices (resume mode) are written to stderr as `SKIP: <key> (...)`.
+//! Skip notices (idempotency is always on) are written to stderr as `SKIP: <key> (...)`.
 
 use std::io::Write;
 
-use agwiki_core::event::IngestEvent;
+use agwiki_core::event::{IngestEvent, PlanAction};
 use aikit_sdk::{AgentEvent, ProgressViewConfig, RunProgress};
 
 /// Mirrors the previous in-core line-oriented progress sink: it pushes agent events
@@ -123,6 +123,24 @@ impl IngestRenderer {
                     "SKIP: {} (already ingested under same policy/content/agent/model)",
                     source_key
                 );
+            }
+            IngestEvent::Planned {
+                source_key,
+                action,
+                reason,
+                external_id,
+            } => {
+                let action_str = match action {
+                    PlanAction::Ingest => "ingest",
+                    PlanAction::Skip => "skip",
+                };
+                let line = serde_json::json!({
+                    "source": source_key,
+                    "action": action_str,
+                    "reason": reason,
+                    "external_id": external_id,
+                });
+                println!("{}", line);
             }
         }
     }

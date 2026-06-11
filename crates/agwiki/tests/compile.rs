@@ -70,7 +70,7 @@ fn compile_happy_path_writes_wiki_and_catalog() -> Result<(), Box<dyn std::error
     )?;
 
     Command::cargo_bin("agwiki")?
-        .arg("compile")
+        .args(["materialize", "--target", "wiki"])
         .arg("-C")
         .arg(&root)
         .assert()
@@ -99,7 +99,7 @@ fn compile_dry_run_does_not_write() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     Command::cargo_bin("agwiki")?
-        .args(["compile", "--dry-run"])
+        .args(["materialize", "--target", "wiki", "--dry-run"])
         .arg("-C")
         .arg(&root)
         .assert()
@@ -135,7 +135,7 @@ fn compile_duplicate_id_fails() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     Command::cargo_bin("agwiki")?
-        .arg("compile")
+        .args(["materialize", "--target", "wiki"])
         .arg("-C")
         .arg(&root)
         .assert()
@@ -160,7 +160,7 @@ fn compile_broken_relation_fails() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     Command::cargo_bin("agwiki")?
-        .arg("compile")
+        .args(["materialize", "--target", "wiki"])
         .arg("-C")
         .arg(&root)
         .assert()
@@ -185,7 +185,7 @@ fn compile_unknown_kind_fails() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     Command::cargo_bin("agwiki")?
-        .arg("compile")
+        .args(["materialize", "--target", "wiki"])
         .arg("-C")
         .arg(&root)
         .assert()
@@ -219,7 +219,7 @@ fn compile_slug_collision_disambiguates_catalog() -> Result<(), Box<dyn std::err
     )?;
 
     Command::cargo_bin("agwiki")?
-        .arg("compile")
+        .args(["materialize", "--target", "wiki"])
         .arg("-C")
         .arg(&root)
         .assert()
@@ -277,15 +277,14 @@ fn export_html_smoke() -> Result<(), Box<dyn std::error::Error>> {
         "# HTML Concept\n\nBody.",
     )?;
     Command::cargo_bin("agwiki")?
-        .arg("compile")
+        .args(["materialize", "--target", "wiki"])
         .arg("-C")
         .arg(&root)
         .assert()
         .success();
 
     Command::cargo_bin("agwiki")?
-        .arg("export")
-        .arg("html")
+        .args(["materialize", "--target", "html"])
         .arg("-C")
         .arg(&root)
         .assert()
@@ -293,5 +292,69 @@ fn export_html_smoke() -> Result<(), Box<dyn std::error::Error>> {
 
     assert!(root.join("dist/html/concepts/html-concept.html").is_file());
     assert!(root.join("dist/html/index.html").is_file());
+    Ok(())
+}
+
+#[test]
+fn materialize_html_custom_out_writes_html() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp = tempdir()?;
+    let root = tmp.path().join("wiki");
+    init_wiki(&root)?;
+    write_entity(
+        &root,
+        "concepts",
+        "a.md",
+        "01HZABC123DEF456GHI789JKL0",
+        "HTML Concept",
+        "",
+        "# HTML Concept\n\nBody.",
+    )?;
+    Command::cargo_bin("agwiki")?
+        .args(["materialize", "--target", "wiki"])
+        .arg("-C")
+        .arg(&root)
+        .assert()
+        .success();
+
+    Command::cargo_bin("agwiki")?
+        .args(["materialize", "--target", "html", "--out", "out-html"])
+        .arg("-C")
+        .arg(&root)
+        .assert()
+        .success();
+
+    assert!(root.join("out-html/concepts/html-concept.html").is_file());
+    assert!(root.join("out-html/index.html").is_file());
+    Ok(())
+}
+
+#[test]
+fn materialize_missing_target_fails() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp = tempdir()?;
+    let root = tmp.path().join("wiki");
+    init_wiki(&root)?;
+
+    Command::cargo_bin("agwiki")?
+        .arg("materialize")
+        .arg("-C")
+        .arg(&root)
+        .assert()
+        .failure();
+    Ok(())
+}
+
+#[test]
+fn materialize_invalid_target_fails() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp = tempdir()?;
+    let root = tmp.path().join("wiki");
+    init_wiki(&root)?;
+
+    Command::cargo_bin("agwiki")?
+        .args(["materialize", "--target", "bogus"])
+        .arg("-C")
+        .arg(&root)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("wiki, skill, or html"));
     Ok(())
 }

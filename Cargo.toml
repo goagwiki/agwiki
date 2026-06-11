@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/agwiki-core", "crates/agwiki"]
+members = ["crates/agwiki-core", "crates/agwiki", "crates/agwiki-py"]
 resolver = "2"
 
 [workspace.package]

@@ -1,0 +1,22 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "agwiki"
+version = "0.3.10"
+requires-python = ">=3.9"
+license = "Apache-2.0"
+description = "Python bindings for agwiki-core: ingest, materialize, and check a markdown wiki in-process"
+readme = "README.md"
+keywords = ["wiki", "markdown", "agent", "python"]
+classifiers = [
+    "Programming Language :: Python",
+    "Programming Language :: Rust",
+    "Operating System :: OS Independent",
+    "License :: OSI Approved :: Apache Software License",
+]
+
+[tool.maturin]
+module-name = "agwiki"
+features = ["pyo3/extension-module"]

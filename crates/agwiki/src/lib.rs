@@ -7,5 +7,6 @@
 //! (`.agwiki/config.toml`) — a CLI-only concern `agwiki-core` never touches.
 
 pub mod config;
+pub mod hooks;
 pub mod ingest_render;
 pub mod serve;

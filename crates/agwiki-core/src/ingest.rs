@@ -7,12 +7,11 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
-use crate::event::IngestEvent;
+use crate::event::{IngestEvent, PlanAction};
 use crate::toolkit::expand_ingest_prompt;
 use aikit_sdk::{is_runnable, run_agent_events, runnable_agents, RunOptions};
 use time::format_description::well_known::Rfc3339;
@@ -25,28 +24,30 @@ const CODE_INGEST_STATE_UTF8_PATH: &str = "AGWIKI_INGEST_STATE_UTF8_PATH";
 
 /// Ledger record schema for a single successful ingest (JSON Lines / `.jsonl`).
 ///
-/// Records are appended only after an agent run succeeds.
+/// Records are appended only after an agent run succeeds. New records are written
+/// with `schema_version: 2`. On read, both `1` and `2` are accepted: v1 lines have
+/// no `external_id` field and deserialize it as `None` via serde default.
 ///
 /// Example (one JSON line):
 /// ```json
-/// {"schema_version":1,"status":"success","wiki_root":"/abs/wiki","source_key":"raw/note.md","content_sha256":"<64-hex>","ingest_policy_sha256":"<64-hex>","agent":"codex","model":null,"completed_at":"2026-04-25T23:10:00Z","agwiki_version":"0.2.0"}
+/// {"schema_version":2,"status":"success","wiki_root":"/abs/wiki","source_key":"raw/note.md","content_sha256":"<64-hex>","ingest_policy_sha256":"<64-hex>","agent":"codex","model":null,"external_id":"vid-123","completed_at":"2026-04-25T23:10:00Z","agwiki_version":"0.2.0"}
 /// ```
 ///
 /// Example (parse a JSONL line):
 /// ```no_run
 /// # use agwiki_core::ingest::IngestStateRecordV1;
 /// let line = format!(
-///   r#"{{"schema_version":1,"status":"success","wiki_root":"/abs/wiki","source_key":"raw/note.md","content_sha256":"{}","ingest_policy_sha256":"{}","agent":"codex","model":null,"completed_at":"2026-04-25T23:10:00Z","agwiki_version":"0.2.0"}}"#,
+///   r#"{{"schema_version":2,"status":"success","wiki_root":"/abs/wiki","source_key":"raw/note.md","content_sha256":"{}","ingest_policy_sha256":"{}","agent":"codex","model":null,"external_id":null,"completed_at":"2026-04-25T23:10:00Z","agwiki_version":"0.2.0"}}"#,
 ///   "0".repeat(64),
 ///   "1".repeat(64),
 /// );
 /// let rec: IngestStateRecordV1 = serde_json::from_str(&line)?;
-/// assert_eq!(rec.schema_version, 1);
+/// assert_eq!(rec.schema_version, 2);
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IngestStateRecordV1 {
-    /// Schema version (MUST be `1`).
+    /// Schema version (`1` for legacy reads, `2` for newly written records).
     pub schema_version: u32,
     /// Record status.
     pub status: IngestStatus,
@@ -62,6 +63,9 @@ pub struct IngestStateRecordV1 {
     pub agent: String,
     /// Optional model override.
     pub model: Option<String>,
+    /// Stable external identity (schema v2; `None` for legacy v1 records).
+    #[serde(default)]
+    pub external_id: Option<String>,
     /// Completion time (RFC3339 UTC).
     pub completed_at: String,
     /// `agwiki` version (from `CARGO_PKG_VERSION`).
@@ -112,31 +116,36 @@ pub struct IngestIdentity {
     pub model: Option<String>,
 }
 
-/// Configuration for resume mode.
+/// Configuration for the always-on ingest ledger.
 ///
-/// When `resume` is enabled, ingests consult an append-only JSONL ledger and may
-/// skip sources with a matching prior `success` identity. When `force` is set,
-/// sources are never skipped (but successes are still appended).
+/// Ingests always consult the append-only JSONL ledger and skip sources with a
+/// matching prior `success` identity. When `force` is set, sources are never
+/// skipped (but successes are still appended). `external_id`, when present,
+/// overrides any frontmatter `external_id` for a single-file ingest.
 ///
 /// Example:
 /// ```no_run
 /// # use std::path::Path;
-/// # use agwiki_core::ingest::IngestResumeConfig;
-/// let cfg = IngestResumeConfig {
-///   resume: true,
+/// # use agwiki_core::ingest::IngestConfig;
+/// let cfg = IngestConfig {
 ///   force: false,
 ///   ingest_state_path: Path::new(".agwiki/ingest-state.jsonl").to_path_buf(),
+///   external_id: None,
+///   dry_run: false,
 /// };
-/// assert!(cfg.resume);
+/// assert!(!cfg.force);
 /// ```
 #[derive(Debug, Clone)]
-pub struct IngestResumeConfig {
-    /// Enable resume ledger behavior.
-    pub resume: bool,
+pub struct IngestConfig {
     /// Force ingest even when a matching success record exists.
     pub force: bool,
     /// Path to the append-only JSON Lines ledger file.
     pub ingest_state_path: PathBuf,
+    /// Override external id (single-file ingest only).
+    pub external_id: Option<String>,
+    /// Plan-only mode: resolve sources, validate, and emit a plan without running
+    /// the agent or writing the ledger.
+    pub dry_run: bool,
 }
 
 #[derive(Debug)]
@@ -218,24 +227,23 @@ fn path_to_utf8_slash(path: &Path) -> Result<String> {
     Ok(out)
 }
 
-/// Load the ingest-state ledger file into a lookup map keyed by [`IngestIdentity`].
+/// Load all successful ingest records from the ledger file.
 ///
-/// MUST error on invalid JSON lines when `resume == true`.
+/// Returns every `success` record with `schema_version` 1 or 2 (v1 lines parse
+/// with `external_id: None` via serde default). A missing ledger returns an empty
+/// vector; a malformed line is always an error.
 ///
 /// Example:
 /// ```no_run
 /// # use std::path::Path;
 /// # use agwiki_core::ingest::load_ingest_state;
-/// let _state = load_ingest_state(Path::new(".agwiki/ingest-state.jsonl"), true)?;
+/// let _records = load_ingest_state(Path::new(".agwiki/ingest-state.jsonl"))?;
 /// # Ok::<(), anyhow::Error>(())
 /// ```
-pub fn load_ingest_state(
-    path: &Path,
-    resume: bool,
-) -> Result<HashMap<IngestIdentity, IngestStateRecordV1>> {
+pub fn load_ingest_state(path: &Path) -> Result<Vec<IngestStateRecordV1>> {
     let file = match std::fs::File::open(path) {
         Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => bail!(
             "{CODE_INGEST_STATE_READ_FAILED}: failed to open ingest-state ledger {}: {e}",
             path.display()
@@ -243,7 +251,7 @@ pub fn load_ingest_state(
     };
 
     let reader = std::io::BufReader::new(file);
-    let mut out: HashMap<IngestIdentity, IngestStateRecordV1> = HashMap::new();
+    let mut out: Vec<IngestStateRecordV1> = Vec::new();
 
     for (line_no, line) in reader.lines().enumerate() {
         let line = line.map_err(|e| {
@@ -256,32 +264,118 @@ pub fn load_ingest_state(
         if trimmed.is_empty() {
             continue;
         }
-        let rec: IngestStateRecordV1 = match serde_json::from_str(trimmed) {
-            Ok(v) => v,
-            Err(e) if resume => {
-                return Err(anyhow::anyhow!(
-                    "{CODE_INGEST_STATE_READ_FAILED}: invalid JSON at {}:{}: {e}",
-                    path.display(),
-                    line_no + 1
-                ))
-            }
-            Err(_) => continue,
-        };
-        if rec.schema_version != 1 || rec.status != IngestStatus::Success {
+        let rec: IngestStateRecordV1 = serde_json::from_str(trimmed).map_err(|e| {
+            anyhow::anyhow!(
+                "{CODE_INGEST_STATE_READ_FAILED}: invalid JSON at {}:{}: {e}",
+                path.display(),
+                line_no + 1
+            )
+        })?;
+        if (rec.schema_version != 1 && rec.schema_version != 2)
+            || rec.status != IngestStatus::Success
+        {
             continue;
         }
-        let key = IngestIdentity {
-            wiki_root: rec.wiki_root.clone(),
-            source_key: rec.source_key.clone(),
-            content_sha256: rec.content_sha256.clone(),
-            ingest_policy_sha256: rec.ingest_policy_sha256.clone(),
-            agent: rec.agent.clone(),
-            model: rec.model.clone(),
-        };
-        out.insert(key, rec);
+        out.push(rec);
     }
 
     Ok(out)
+}
+
+/// True if `records` already contain a successful ingest matching this source under
+/// the current identity rules. external_id is authoritative; otherwise content identity.
+#[allow(clippy::too_many_arguments)]
+fn is_already_ingested(
+    records: &[IngestStateRecordV1],
+    wiki_root: &str,
+    policy_sha: &str,
+    source_key: &str,
+    content_sha: &str,
+    agent: &str,
+    model: Option<&str>,
+    external_id: Option<&str>,
+) -> bool {
+    records.iter().any(|r| {
+        if r.wiki_root != wiki_root || r.ingest_policy_sha256 != policy_sha {
+            return false;
+        }
+        match external_id {
+            // Authoritative: same wiki_root + external_id + ingest policy. Content/agent/model ignored.
+            Some(eid) => r.external_id.as_deref() == Some(eid),
+            // Fallback: full content identity, including agent + model.
+            None => {
+                r.source_key == source_key
+                    && r.content_sha256 == content_sha
+                    && r.agent == agent
+                    && r.model.as_deref() == model
+            }
+        }
+    })
+}
+
+/// Decide the dry-run plan action and a short reason string for a source.
+///
+/// Skip only when a matching success record exists and `--force` is not set;
+/// otherwise ingest. `has_external_id` distinguishes the skip reason between the
+/// authoritative external-id match and the content-identity fallback.
+fn plan_decision(
+    already_ingested: bool,
+    force: bool,
+    has_external_id: bool,
+) -> (PlanAction, &'static str) {
+    if already_ingested && !force {
+        if has_external_id {
+            (PlanAction::Skip, "already ingested (external_id)")
+        } else {
+            (PlanAction::Skip, "already ingested (content)")
+        }
+    } else {
+        (PlanAction::Ingest, "new source")
+    }
+}
+
+/// Extract `external_id` from a leading YAML frontmatter block (`---\n ... \n---`).
+fn frontmatter_external_id(path: &Path) -> Result<Option<String>> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("read frontmatter from {}", path.display()))?;
+    // Strip a leading UTF-8 BOM if present.
+    let content = content.strip_prefix('\u{feff}').unwrap_or(&content);
+
+    // Frontmatter must start at the very first line with a `---` fence.
+    let rest = match content.strip_prefix("---\n") {
+        Some(r) => r,
+        None => match content.strip_prefix("---\r\n") {
+            Some(r) => r,
+            None => return Ok(None),
+        },
+    };
+
+    // Find the closing fence (`---` on its own line).
+    let mut block = String::new();
+    let mut found_close = false;
+    for line in rest.lines() {
+        let t = line.trim_end_matches('\r');
+        if t == "---" || t == "..." {
+            found_close = true;
+            break;
+        }
+        block.push_str(line);
+        block.push('\n');
+    }
+    if !found_close {
+        return Ok(None);
+    }
+
+    #[derive(Deserialize)]
+    struct Fm {
+        #[serde(default)]
+        external_id: Option<String>,
+    }
+    let fm: Fm = match serde_yaml::from_str(&block) {
+        Ok(v) => v,
+        Err(_) => return Ok(None),
+    };
+    Ok(fm.external_id)
 }
 
 /// Compute SHA-256 as lowercase hex (raw file bytes).
@@ -382,7 +476,7 @@ pub fn source_key_for(wiki_root: &Path, canonical_source: &Path) -> Result<Strin
 /// # use std::path::Path;
 /// # use agwiki_core::ingest::{append_ingest_success, IngestStateRecordV1, IngestStatus};
 /// let rec = IngestStateRecordV1{
-///   schema_version: 1,
+///   schema_version: 2,
 ///   status: IngestStatus::Success,
 ///   wiki_root: "/abs/wiki".to_string(),
 ///   source_key: "raw/note.md".to_string(),
@@ -390,6 +484,7 @@ pub fn source_key_for(wiki_root: &Path, canonical_source: &Path) -> Result<Strin
 ///   ingest_policy_sha256: "1".repeat(64),
 ///   agent: "codex".to_string(),
 ///   model: None,
+///   external_id: None,
 ///   completed_at: "2026-01-01T00:00:00Z".to_string(),
 ///   agwiki_version: env!("CARGO_PKG_VERSION").to_string(),
 /// };
@@ -450,7 +545,36 @@ pub enum IngestFileOutcome {
     Skipped,
 }
 
-/// Run a single-file ingest with optional resume semantics.
+/// Result of a single-file ingest, carrying the source identity the caller needs
+/// for downstream work (e.g. CLI lifecycle hooks). This is pure data: core does
+/// not act on it.
+///
+/// Example:
+/// ```no_run
+/// # use agwiki_core::ingest::{IngestFileResult, IngestFileOutcome};
+/// let r = IngestFileResult {
+///   outcome: IngestFileOutcome::Ingested,
+///   source_key: "raw/note.md".to_string(),
+///   external_id: Some("vid-123".to_string()),
+/// };
+/// assert_eq!(r.source_key, "raw/note.md");
+/// ```
+#[derive(Debug, Clone)]
+pub struct IngestFileResult {
+    /// Whether the file was ingested or skipped.
+    pub outcome: IngestFileOutcome,
+    /// Stable source identity key for this file.
+    pub source_key: String,
+    /// Resolved external id (flag override or frontmatter), if any.
+    pub external_id: Option<String>,
+}
+
+/// Run a single-file ingest with always-on ledger idempotency.
+///
+/// The ledger is always consulted and written. A source is skipped when a prior
+/// success record matches under the current identity rules (external id is
+/// authoritative; otherwise content identity). `--force` (via [`IngestConfig`])
+/// re-ingests even a seen id.
 ///
 /// MUST preserve existing stdout NDJSON behavior for agent events when ingesting.
 /// When skipping, prints a single-line skip notice to stderr.
@@ -458,13 +582,14 @@ pub enum IngestFileOutcome {
 /// Example:
 /// ```no_run
 /// # use std::path::Path;
-/// # use agwiki_core::ingest::{run_ingest_file_with_resume, IngestResumeConfig};
-/// let cfg = IngestResumeConfig{ resume: true, force: false, ingest_state_path: Path::new(".agwiki/ingest-state.jsonl").to_path_buf() };
-/// let _ = run_ingest_file_with_resume(Path::new("."), Path::new("raw/note.md"), Path::new("ingest.md"), "codex", None, false, false, Some(&cfg), &mut |_| {})?;
+/// # use agwiki_core::ingest::{run_ingest_file, IngestConfig};
+/// let cfg = IngestConfig{ force: false, ingest_state_path: Path::new(".agwiki/ingest-state.jsonl").to_path_buf(), external_id: None, dry_run: false };
+/// let r = run_ingest_file(Path::new("."), Path::new("raw/note.md"), Path::new("ingest.md"), "codex", None, false, false, &cfg, &mut |_| {})?;
+/// let _ = r.source_key;
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 #[allow(clippy::too_many_arguments)]
-pub fn run_ingest_file_with_resume(
+pub fn run_ingest_file(
     wiki_root: &Path,
     source_file: &Path,
     prompt_path: &Path,
@@ -472,22 +597,59 @@ pub fn run_ingest_file_with_resume(
     model: Option<&str>,
     stream: bool,
     progress: bool,
-    resume: Option<&IngestResumeConfig>,
+    cfg: &IngestConfig,
     sink: &mut (dyn FnMut(IngestEvent) + Send),
-) -> Result<IngestFileOutcome> {
-    let Some(cfg) = resume.filter(|c| c.resume) else {
-        run_ingest_for_path(
-            wiki_root,
-            source_file,
-            prompt_path,
+) -> Result<IngestFileResult> {
+    // Dry-run: read-only ledger consult; no parent-dir creation, no write lock.
+    if cfg.dry_run {
+        let records = load_ingest_state(&cfg.ingest_state_path)?;
+        let policy_sha = ingest_policy_sha256(wiki_root)?;
+
+        let ingest_path = resolve_ingest_source(source_file)?;
+        let wiki_root_str = wiki_root.to_str().ok_or_else(|| {
+            anyhow::anyhow!(
+                "{CODE_INGEST_STATE_UTF8_PATH}: wiki root is not valid UTF-8: {}",
+                wiki_root.display()
+            )
+        })?;
+        let source_key = source_key_for(wiki_root, &ingest_path)?;
+        let content_sha = sha256_hex_file(&ingest_path)?;
+
+        // Flag overrides frontmatter for single-file ingest.
+        let external_id = match &cfg.external_id {
+            Some(id) => Some(id.clone()),
+            None => frontmatter_external_id(&ingest_path)?,
+        };
+
+        let already = is_already_ingested(
+            &records,
+            wiki_root_str,
+            &policy_sha,
+            &source_key,
+            &content_sha,
             agent,
             model,
-            stream,
-            progress,
-            sink,
-        )?;
-        return Ok(IngestFileOutcome::Ingested);
-    };
+            external_id.as_deref(),
+        );
+        let (action, reason) = plan_decision(already, cfg.force, external_id.is_some());
+        sink(IngestEvent::Planned {
+            source_key: source_key.clone(),
+            action,
+            reason: reason.to_string(),
+            external_id: external_id.clone(),
+        });
+        // No work happened; map the planned action onto the outcome type. The CLI
+        // ignores this value in dry-run.
+        let outcome = match action {
+            PlanAction::Skip => IngestFileOutcome::Skipped,
+            PlanAction::Ingest => IngestFileOutcome::Ingested,
+        };
+        return Ok(IngestFileResult {
+            outcome,
+            source_key,
+            external_id,
+        });
+    }
 
     if let Some(parent) = cfg.ingest_state_path.parent() {
         std::fs::create_dir_all(parent)
@@ -495,7 +657,7 @@ pub fn run_ingest_file_with_resume(
     }
 
     let _lock = IngestStateLock::acquire(&cfg.ingest_state_path)?;
-    let state = load_ingest_state(&cfg.ingest_state_path, true)?;
+    let records = load_ingest_state(&cfg.ingest_state_path)?;
     let policy_sha = ingest_policy_sha256(wiki_root)?;
 
     let ingest_path = resolve_ingest_source(source_file)?;
@@ -508,20 +670,32 @@ pub fn run_ingest_file_with_resume(
     let source_key = source_key_for(wiki_root, &ingest_path)?;
     let content_sha = sha256_hex_file(&ingest_path)?;
 
-    let identity = IngestIdentity {
-        wiki_root: wiki_root_str.to_string(),
-        source_key: source_key.clone(),
-        content_sha256: content_sha.clone(),
-        ingest_policy_sha256: policy_sha.clone(),
-        agent: agent.to_string(),
-        model: model.map(|s| s.to_string()),
+    // Flag overrides frontmatter for single-file ingest.
+    let external_id = match &cfg.external_id {
+        Some(id) => Some(id.clone()),
+        None => frontmatter_external_id(&ingest_path)?,
     };
 
-    if !cfg.force && state.contains_key(&identity) {
+    if !cfg.force
+        && is_already_ingested(
+            &records,
+            wiki_root_str,
+            &policy_sha,
+            &source_key,
+            &content_sha,
+            agent,
+            model,
+            external_id.as_deref(),
+        )
+    {
         sink(IngestEvent::Skipped {
             source_key: source_key.clone(),
         });
-        return Ok(IngestFileOutcome::Skipped);
+        return Ok(IngestFileResult {
+            outcome: IngestFileOutcome::Skipped,
+            source_key,
+            external_id,
+        });
     }
 
     let prompt = expand_ingest_prompt(wiki_root, &ingest_path, prompt_path)?;
@@ -531,27 +705,53 @@ pub fn run_ingest_file_with_resume(
         .format(&Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
     let record = IngestStateRecordV1 {
-        schema_version: 1,
+        schema_version: 2,
         status: IngestStatus::Success,
         wiki_root: wiki_root_str.to_string(),
-        source_key,
+        source_key: source_key.clone(),
         content_sha256: content_sha,
         ingest_policy_sha256: policy_sha,
         agent: agent.to_string(),
         model: model.map(|s| s.to_string()),
+        external_id: external_id.clone(),
         completed_at,
         agwiki_version: env!("CARGO_PKG_VERSION").to_string(),
     };
     append_ingest_success(&cfg.ingest_state_path, &record)?;
-    Ok(IngestFileOutcome::Ingested)
+    Ok(IngestFileResult {
+        outcome: IngestFileOutcome::Ingested,
+        source_key,
+        external_id,
+    })
+}
+
+/// Identity of one source actually ingested in a batch (pure data for callers
+/// such as CLI lifecycle hooks). Pushed only for files that ran the agent — not
+/// for skipped or dry-run-planned files.
+///
+/// Example:
+/// ```no_run
+/// # use agwiki_core::ingest::IngestedSource;
+/// let s = IngestedSource { source_key: "raw/a.md".to_string(), external_id: None };
+/// assert_eq!(s.source_key, "raw/a.md");
+/// ```
+#[derive(Debug, Clone)]
+pub struct IngestedSource {
+    /// Stable source identity key.
+    pub source_key: String,
+    /// Resolved external id (frontmatter), if any.
+    pub external_id: Option<String>,
 }
 
 /// Folder ingest summary with resume support.
 ///
+/// `ingested` lists one [`IngestedSource`] per file that actually ran the agent
+/// (skipped and dry-run-planned files are excluded).
+///
 /// Example:
 /// ```no_run
 /// # use agwiki_core::ingest::FolderIngestResultV2;
-/// let r = FolderIngestResultV2 { total: 2, succeeded: 1, skipped: 1, failures: vec![] };
+/// let r = FolderIngestResultV2 { total: 2, succeeded: 1, skipped: 1, failures: vec![], ingested: vec![] };
 /// assert_eq!(r.skipped, 1);
 /// ```
 #[derive(Debug)]
@@ -560,22 +760,26 @@ pub struct FolderIngestResultV2 {
     pub succeeded: usize,
     pub skipped: usize,
     pub failures: Vec<(PathBuf, String)>,
+    pub ingested: Vec<IngestedSource>,
 }
 
-/// Run folder ingest with resume support and return summary including skipped count.
+/// Run a batch folder ingest with always-on ledger idempotency and return a
+/// summary including the skipped count.
 ///
-/// Existing [`run_folder_ingest`] remains available and preserves current behavior.
+/// The `--external-id` flag does not apply to a batch; each file's external id is
+/// resolved from its own frontmatter. The non-ledger [`run_folder_ingest`] remains
+/// available for callers that need it.
 ///
 /// Example:
 /// ```no_run
 /// # use std::path::Path;
-/// # use agwiki_core::ingest::{run_folder_ingest_with_resume, IngestResumeConfig};
-/// let cfg = IngestResumeConfig{ resume: true, force: false, ingest_state_path: Path::new(".agwiki/ingest-state.jsonl").to_path_buf() };
-/// let _ = run_folder_ingest_with_resume(Path::new("."), Path::new("raw"), Path::new("ingest.md"), "codex", None, false, false, 0, Some(&cfg), &mut |_| {})?;
+/// # use agwiki_core::ingest::{run_folder_ingest_batch, IngestConfig};
+/// let cfg = IngestConfig{ force: false, ingest_state_path: Path::new(".agwiki/ingest-state.jsonl").to_path_buf(), external_id: None, dry_run: false };
+/// let _ = run_folder_ingest_batch(Path::new("."), Path::new("raw"), Path::new("ingest.md"), "codex", None, false, false, 0, &cfg, &mut |_| {})?;
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 #[allow(clippy::too_many_arguments)]
-pub fn run_folder_ingest_with_resume(
+pub fn run_folder_ingest_batch(
     wiki_root: &Path,
     folder: &Path,
     prompt_path: &Path,
@@ -584,36 +788,16 @@ pub fn run_folder_ingest_with_resume(
     stream: bool,
     progress: bool,
     max_files: usize,
-    resume: Option<&IngestResumeConfig>,
+    cfg: &IngestConfig,
     sink: &mut (dyn FnMut(IngestEvent) + Send),
 ) -> Result<FolderIngestResultV2> {
-    let Some(cfg) = resume.filter(|c| c.resume) else {
-        let r = run_folder_ingest(
-            wiki_root,
-            folder,
-            prompt_path,
-            agent,
-            model,
-            stream,
-            progress,
-            max_files,
-            sink,
-        )?;
-        return Ok(FolderIngestResultV2 {
-            total: r.total,
-            succeeded: r.succeeded,
-            skipped: 0,
-            failures: r.failures,
-        });
-    };
-
     if let Some(parent) = cfg.ingest_state_path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create ingest-state parent dir {}", parent.display()))?;
     }
 
     let _lock = IngestStateLock::acquire(&cfg.ingest_state_path)?;
-    let mut state = load_ingest_state(&cfg.ingest_state_path, true)?;
+    let mut records = load_ingest_state(&cfg.ingest_state_path)?;
     let policy_sha = ingest_policy_sha256(wiki_root)?;
 
     let files = discover_md_files(folder)?;
@@ -638,6 +822,7 @@ pub fn run_folder_ingest_with_resume(
     })?;
 
     let mut failures: Vec<(PathBuf, String)> = Vec::new();
+    let mut ingested: Vec<IngestedSource> = Vec::new();
     let mut skipped = 0usize;
     let mut succeeded = 0usize;
     let mut files_processed = 0usize;
@@ -667,16 +852,44 @@ pub fn run_folder_ingest_with_resume(
             }
         };
 
-        let identity = IngestIdentity {
-            wiki_root: wiki_root_str.to_string(),
-            source_key: source_key.clone(),
-            content_sha256: content_sha.clone(),
-            ingest_policy_sha256: policy_sha.clone(),
-            agent: agent.to_string(),
-            model: model.map(|s| s.to_string()),
+        // Flag does not apply to a batch: resolve per-file frontmatter.
+        let external_id = match frontmatter_external_id(&ingest_path) {
+            Ok(id) => id,
+            Err(e) => {
+                failures.push((file.clone(), e.to_string()));
+                continue;
+            }
         };
 
-        if !cfg.force && state.contains_key(&identity) {
+        let already = is_already_ingested(
+            &records,
+            wiki_root_str,
+            &policy_sha,
+            &source_key,
+            &content_sha,
+            agent,
+            model,
+            external_id.as_deref(),
+        );
+
+        // Dry-run: emit a plan decision and run/append nothing. Count Skip as
+        // skipped and Ingest as succeeded for summary purposes.
+        if cfg.dry_run {
+            let (action, reason) = plan_decision(already, cfg.force, external_id.is_some());
+            match action {
+                PlanAction::Skip => skipped += 1,
+                PlanAction::Ingest => succeeded += 1,
+            }
+            sink(IngestEvent::Planned {
+                source_key,
+                action,
+                reason: reason.to_string(),
+                external_id,
+            });
+            continue;
+        }
+
+        if !cfg.force && already {
             skipped += 1;
             sink(IngestEvent::Skipped {
                 source_key: source_key.clone(),
@@ -708,14 +921,15 @@ pub fn run_folder_ingest_with_resume(
             .format(&Rfc3339)
             .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
         let record = IngestStateRecordV1 {
-            schema_version: 1,
+            schema_version: 2,
             status: IngestStatus::Success,
             wiki_root: wiki_root_str.to_string(),
-            source_key,
+            source_key: source_key.clone(),
             content_sha256: content_sha,
             ingest_policy_sha256: policy_sha.clone(),
             agent: agent.to_string(),
             model: model.map(|s| s.to_string()),
+            external_id: external_id.clone(),
             completed_at,
             agwiki_version: env!("CARGO_PKG_VERSION").to_string(),
         };
@@ -724,7 +938,11 @@ pub fn run_folder_ingest_with_resume(
             failures.push((file.clone(), e.to_string()));
             continue;
         }
-        state.insert(identity, record);
+        records.push(record);
+        ingested.push(IngestedSource {
+            source_key,
+            external_id,
+        });
         succeeded += 1;
     }
 
@@ -737,6 +955,7 @@ pub fn run_folder_ingest_with_resume(
         succeeded,
         skipped,
         failures,
+        ingested,
     })
 }
 

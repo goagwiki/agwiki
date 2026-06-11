@@ -15,10 +15,7 @@ use agwiki::ingest_render::IngestRenderer;
 use agwiki::serve::{run_serve_blocking, ServerConfig};
 use agwiki_core::compile::{run_compile, run_export_html, run_new, CompileOptions};
 use agwiki_core::export_skill::{run_export, ExportOptions};
-use agwiki_core::ingest::{
-    run_folder_ingest, run_folder_ingest_with_resume, run_ingest_file_with_resume,
-    IngestResumeConfig,
-};
+use agwiki_core::ingest::{run_folder_ingest_batch, run_ingest_file, IngestConfig};
 use agwiki_core::init::run_init;
 use agwiki_core::toolkit::require_wiki_ingest_prompt;
 use agwiki_core::upkeep::validate_wiki_root;
@@ -163,10 +160,11 @@ pub struct IngestArgs {
     pub folder: Option<PathBuf>,
     pub max_files: usize,
     pub compile: bool,
-    pub resume: bool,
     pub progress: bool,
     pub force: bool,
     pub ingest_state: Option<PathBuf>,
+    pub external_id: Option<String>,
+    pub dry_run: bool,
 }
 
 impl IntoCommandSpec for IngestArgs {
@@ -178,12 +176,17 @@ impl IntoCommandSpec for IngestArgs {
             long_about: Some(
                 "Expands {{INGEST_PATH}} and {{WIKI_ROOT}} in <wiki-root>/ingest.md. \
                  The agent is resolved by precedence: -a/--agent, then AGWIKI_AGENT, \
-                 then [defaults].agent in <wiki-root>/.agwiki/config.toml.",
+                 then [defaults].agent in <wiki-root>/.agwiki/config.toml. \
+                 Idempotency is always on: the ledger at <wiki-root>/.agwiki/ingest-state.jsonl \
+                 is always written and consulted, so an already-ingested source is skipped. \
+                 Identity is external-id-authoritative (from --external-id or frontmatter \
+                 external_id), falling back to content identity. Pass --force to re-ingest.",
             ),
             examples: vec![
                 "agwiki ingest -a opencode ./raw/note.md",
                 "agwiki ingest -a codex --folder ./raw --max-files 0",
-                "agwiki ingest --resume -a codex ./raw/note.md",
+                "agwiki ingest -a codex --external-id vid-123 ./raw/note.md",
+                "agwiki ingest --force -a codex ./raw/note.md",
                 "agwiki ingest ./raw/note.md   # agent from .agwiki/config.toml",
             ],
             exit_codes: vec![
@@ -261,11 +264,12 @@ impl IntoCommandSpec for IngestArgs {
                     ..Default::default()
                 },
                 ArgSpec {
-                    name: "resume",
-                    kind: ArgKind::Flag,
-                    value_type: ArgValueType::Bool,
+                    name: "external-id",
+                    kind: ArgKind::Option,
+                    value_type: ArgValueType::String,
                     cardinality: Cardinality::Optional,
-                    help: "Enable resume mode: skip sources already successfully ingested",
+                    conflicts_with: vec!["folder"],
+                    help: "Stable external id for this source (overrides frontmatter external_id; single-file only)",
                     ..Default::default()
                 },
                 ArgSpec {
@@ -281,8 +285,7 @@ impl IntoCommandSpec for IngestArgs {
                     kind: ArgKind::Flag,
                     value_type: ArgValueType::Bool,
                     cardinality: Cardinality::Optional,
-                    requires: vec!["resume"],
-                    help: "Force re-ingest even when resume finds a matching success record",
+                    help: "Force re-ingest even when the ledger holds a matching success record",
                     ..Default::default()
                 },
                 ArgSpec {
@@ -290,8 +293,15 @@ impl IntoCommandSpec for IngestArgs {
                     kind: ArgKind::Option,
                     value_type: ArgValueType::String,
                     cardinality: Cardinality::Optional,
-                    requires: vec!["resume"],
                     help: "Path to the ingest-state JSONL ledger (default: <wiki-root>/.agwiki/ingest-state.jsonl)",
+                    ..Default::default()
+                },
+                ArgSpec {
+                    name: "dry-run",
+                    kind: ArgKind::Flag,
+                    value_type: ArgValueType::Bool,
+                    cardinality: Cardinality::Optional,
+                    help: "Resolve and plan sources without running the agent or writing the ledger; emits a JSON plan on stdout",
                     ..Default::default()
                 },
             ],
@@ -362,7 +372,6 @@ impl FromArgValueMap for IngestArgs {
                 })
                 .unwrap_or(30),
             compile: matches!(map.get("compile"), Some(ArgValue::Bool(true))),
-            resume: matches!(map.get("resume"), Some(ArgValue::Bool(true))),
             progress: matches!(map.get("progress"), Some(ArgValue::Bool(true))),
             force: matches!(map.get("force"), Some(ArgValue::Bool(true))),
             ingest_state: map
@@ -375,6 +384,17 @@ impl FromArgValueMap for IngestArgs {
                     }
                 })
                 .map(PathBuf::from),
+            external_id: map
+                .get("external-id")
+                .and_then(|v| {
+                    if let ArgValue::Str(s) = v {
+                        Some(s.clone())
+                    } else {
+                        None
+                    }
+                })
+                .filter(|s| !s.trim().is_empty()),
+            dry_run: matches!(map.get("dry-run"), Some(ArgValue::Bool(true))),
         }
     }
 }
@@ -405,31 +425,28 @@ async fn execute_ingest(args: IngestArgs) -> Result<()> {
         op_cfg.defaults.model,
     );
 
-    let do_resume = args.resume;
     let do_force = args.force;
     let do_compile = args.compile;
     let do_stream = args.stream;
     let do_progress = args.progress;
 
-    // E-ARGS-005: --force and --ingest-state require --resume
-    if !do_resume && (do_force || args.ingest_state.is_some()) {
-        anyhow::bail!("--force and --ingest-state require --resume");
-    }
-
-    let resume_cfg = if do_resume {
-        let state_path = resolve_ingest_state_path(&root, args.ingest_state)?;
-        Some(IngestResumeConfig {
-            resume: true,
-            force: do_force,
-            ingest_state_path: state_path,
-        })
-    } else {
-        None
+    let cfg = IngestConfig {
+        force: do_force,
+        ingest_state_path: resolve_ingest_state_path(&root, args.ingest_state)?,
+        external_id: args.external_id,
+        dry_run: args.dry_run,
     };
 
     let file = args.file;
     let folder = args.folder;
     let max_files = args.max_files;
+    let dry_run = args.dry_run;
+
+    // Hooks are a CLI-only concern (ADR 0002): core never runs them. They are
+    // never run in --dry-run.
+    let hooks = &op_cfg.hooks;
+    let coe = hooks.continue_on_error;
+    let wiki_root_str = root.display().to_string();
 
     let mut renderer = IngestRenderer::new(do_progress);
 
@@ -437,7 +454,7 @@ async fn execute_ingest(args: IngestArgs) -> Result<()> {
         (Some(file), None) => {
             let prompt_path = require_wiki_ingest_prompt(&root)?;
             let mut sink = renderer.sink();
-            run_ingest_file_with_resume(
+            let result = run_ingest_file(
                 &root,
                 &file,
                 &prompt_path,
@@ -445,66 +462,118 @@ async fn execute_ingest(args: IngestArgs) -> Result<()> {
                 model.as_deref(),
                 do_stream,
                 do_progress,
-                resume_cfg.as_ref(),
+                &cfg,
                 &mut sink,
-            )?;
+            );
+            drop(sink);
+
+            let result = match result {
+                Ok(r) => r,
+                Err(e) => {
+                    if !dry_run {
+                        let abs_source = file
+                            .canonicalize()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|_| file.display().to_string());
+                        let env = vec![
+                            ("AGWIKI_WIKI_ROOT", wiki_root_str.clone()),
+                            ("AGWIKI_SOURCE", abs_source),
+                            ("AGWIKI_ERROR", e.to_string()),
+                        ];
+                        agwiki::hooks::run_hook_if_set(&hooks.on_error, &root, &env, coe)?;
+                    }
+                    return Err(e);
+                }
+            };
+
+            if !dry_run && result.outcome == agwiki_core::ingest::IngestFileOutcome::Ingested {
+                let abs_source = file
+                    .canonicalize()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| file.display().to_string());
+                let env = vec![
+                    ("AGWIKI_WIKI_ROOT", wiki_root_str.clone()),
+                    ("AGWIKI_SOURCE", abs_source),
+                    ("AGWIKI_SOURCE_KEY", result.source_key.clone()),
+                    (
+                        "AGWIKI_EXTERNAL_ID",
+                        result.external_id.clone().unwrap_or_default(),
+                    ),
+                    ("AGWIKI_AGENT", agent.to_string()),
+                    ("AGWIKI_MODEL", model.clone().unwrap_or_default()),
+                ];
+                agwiki::hooks::run_hook_if_set(&hooks.after_source, &root, &env, coe)?;
+            }
         }
         (None, Some(folder)) => {
             let prompt_path = require_wiki_ingest_prompt(&root)?;
-            if let Some(cfg) = resume_cfg.as_ref() {
-                let mut sink = renderer.sink();
-                let result = run_folder_ingest_with_resume(
-                    &root,
-                    &folder,
-                    &prompt_path,
-                    agent,
-                    model.as_deref(),
-                    do_stream,
-                    do_progress,
-                    max_files,
-                    Some(cfg),
-                    &mut sink,
-                )?;
-                drop(sink);
-                eprintln!(
-                    "Batch ingest: {} total, {} succeeded, {} skipped, {} failed.",
-                    result.total,
-                    result.succeeded,
-                    result.skipped,
-                    result.failures.len()
-                );
+            let mut sink = renderer.sink();
+            let result = run_folder_ingest_batch(
+                &root,
+                &folder,
+                &prompt_path,
+                agent,
+                model.as_deref(),
+                do_stream,
+                do_progress,
+                max_files,
+                &cfg,
+                &mut sink,
+            )?;
+            drop(sink);
+
+            if !dry_run {
+                // after_source: once per file that actually ingested.
+                for src in &result.ingested {
+                    let env = vec![
+                        ("AGWIKI_WIKI_ROOT", wiki_root_str.clone()),
+                        (
+                            "AGWIKI_SOURCE",
+                            root.join(&src.source_key).display().to_string(),
+                        ),
+                        ("AGWIKI_SOURCE_KEY", src.source_key.clone()),
+                        (
+                            "AGWIKI_EXTERNAL_ID",
+                            src.external_id.clone().unwrap_or_default(),
+                        ),
+                        ("AGWIKI_AGENT", agent.to_string()),
+                        ("AGWIKI_MODEL", model.clone().unwrap_or_default()),
+                    ];
+                    agwiki::hooks::run_hook_if_set(&hooks.after_source, &root, &env, coe)?;
+                }
+
+                // on_error: once per failed file.
                 for (path, err) in &result.failures {
-                    eprintln!("  FAILED: {} — {}", path.display(), err);
+                    let env = vec![
+                        ("AGWIKI_WIKI_ROOT", wiki_root_str.clone()),
+                        ("AGWIKI_SOURCE", path.display().to_string()),
+                        ("AGWIKI_ERROR", err.clone()),
+                    ];
+                    agwiki::hooks::run_hook_if_set(&hooks.on_error, &root, &env, coe)?;
                 }
-                if !result.failures.is_empty() {
-                    std::process::exit(1);
-                }
-            } else {
-                let mut sink = renderer.sink();
-                let result = run_folder_ingest(
-                    &root,
-                    &folder,
-                    &prompt_path,
-                    agent,
-                    model.as_deref(),
-                    do_stream,
-                    do_progress,
-                    max_files,
-                    &mut sink,
-                )?;
-                drop(sink);
-                eprintln!(
-                    "Batch ingest: {} total, {} succeeded, {} failed.",
-                    result.total,
-                    result.succeeded,
-                    result.failures.len()
-                );
-                for (path, err) in &result.failures {
-                    eprintln!("  FAILED: {} — {}", path.display(), err);
-                }
-                if !result.failures.is_empty() {
-                    std::process::exit(1);
-                }
+
+                // after_batch: once after the batch completes, before exit(1).
+                let env = vec![
+                    ("AGWIKI_WIKI_ROOT", wiki_root_str.clone()),
+                    ("AGWIKI_INGESTED", result.succeeded.to_string()),
+                    ("AGWIKI_SKIPPED", result.skipped.to_string()),
+                    ("AGWIKI_FAILED", result.failures.len().to_string()),
+                ];
+                agwiki::hooks::run_hook_if_set(&hooks.after_batch, &root, &env, coe)?;
+            }
+
+            eprintln!(
+                "Batch ingest: {} total, {} succeeded, {} skipped, {} failed.",
+                result.total,
+                result.succeeded,
+                result.skipped,
+                result.failures.len()
+            );
+            for (path, err) in &result.failures {
+                eprintln!("  FAILED: {} — {}", path.display(), err);
+            }
+            if !result.failures.is_empty() {
+                std::process::exit(1);
             }
         }
         (Some(_), Some(_)) => {
@@ -615,76 +684,6 @@ async fn execute_new(args: NewArgs) -> Result<()> {
     Ok(())
 }
 
-// ── compile ───────────────────────────────────────────────────────────────────
-
-pub struct CompileArgs {
-    pub wiki_root: Option<PathBuf>,
-    pub dry_run: bool,
-}
-
-impl IntoCommandSpec for CompileArgs {
-    fn command_spec() -> CommandSpec {
-        CommandSpec {
-            summary: "Validate content sources and render generated markdown into wiki/",
-            syntax: Some("compile [--dry-run]"),
-            category: Some("build"),
-            examples: vec!["agwiki compile", "agwiki compile --dry-run"],
-            exit_codes: vec![
-                cli_framework::spec::command_tree::ExitCodeEntry {
-                    code: 0,
-                    description: "Success",
-                },
-                cli_framework::spec::command_tree::ExitCodeEntry {
-                    code: 1,
-                    description: "Compile errors found",
-                },
-            ],
-            args: vec![
-                wiki_root_arg(),
-                ArgSpec {
-                    name: "dry-run",
-                    kind: ArgKind::Flag,
-                    value_type: ArgValueType::Bool,
-                    cardinality: Cardinality::Optional,
-                    help: "Validate and print planned writes without changing files",
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        }
-    }
-}
-
-impl FromArgValueMap for CompileArgs {
-    fn from_arg_value_map(map: &HashMap<String, ArgValue>) -> Self {
-        Self {
-            wiki_root: map
-                .get("wiki-root")
-                .and_then(|v| {
-                    if let ArgValue::Str(s) = v {
-                        Some(s.clone())
-                    } else {
-                        None
-                    }
-                })
-                .map(PathBuf::from),
-            dry_run: matches!(map.get("dry-run"), Some(ArgValue::Bool(true))),
-        }
-    }
-}
-
-async fn execute_compile(args: CompileArgs) -> Result<()> {
-    let root = resolve_root(args.wiki_root)?;
-    let report = run_compile(CompileOptions {
-        wiki_root: root,
-        dry_run: args.dry_run,
-    })?;
-    if !report.errors.is_empty() {
-        std::process::exit(1);
-    }
-    Ok(())
-}
-
 // ── serve ─────────────────────────────────────────────────────────────────────
 
 pub struct ServeArgs {
@@ -792,52 +791,79 @@ async fn execute_serve(args: ServeArgs) -> Result<()> {
     Ok(())
 }
 
-// ── export ────────────────────────────────────────────────────────────────────
+// ── materialize ─────────────────────────────────────────────────────────────────
 
-pub struct ExportArgs {
-    pub subcommand: String,
+pub struct MaterializeArgs {
+    pub target: String,
     pub wiki_root: Option<PathBuf>,
+    pub dry_run: bool,
     pub skill_root: Option<PathBuf>,
     pub skill_md: Option<PathBuf>,
-    pub dry_run: bool,
     pub prune: bool,
     pub out: Option<String>,
 }
 
-impl IntoCommandSpec for ExportArgs {
+impl IntoCommandSpec for MaterializeArgs {
     fn command_spec() -> CommandSpec {
         CommandSpec {
-            summary: "Publish/export workflows: export skill or export html",
-            syntax: Some("export <skill|html> [options]"),
-            category: Some("export"),
+            summary: "Render the content model into a concrete target layout (wiki, skill, or html)",
+            syntax: Some("materialize --target <wiki|skill|html> [options]"),
+            category: Some("materialize"),
             long_about: Some(
-                "Subcommands: skill — mirror wiki/ into the skill bundle; html — static HTML export.",
+                "Materialize renders the content model into a concrete target and is agnostic \
+                 to who consumes it. It subsumes the former compile / export skill / export html \
+                 commands into one verb; the wiki is just one target, no longer privileged.\n\n\
+                 Targets:\n  \
+                 wiki  — validate content sources and render generated markdown into wiki/ \
+                 (the former `compile`). Honors --dry-run.\n  \
+                 skill — mirror wiki/ into the Agent Skill bundle under skill/references/ and \
+                 update SKILL.md (the former `export skill`). Honors --dry-run, --skill-root, \
+                 --skill-md, --prune.\n  \
+                 html  — static HTML export of the wiki (the former `export html`). Honors --out.\n\n\
+                 --target is required and has no default: pass one of wiki, skill, or html. \
+                 Target-specific flags are rejected when used with the wrong target.",
             ),
             examples: vec![
-                "agwiki export skill",
-                "agwiki export skill --prune",
-                "agwiki export skill --dry-run",
+                "agwiki materialize --target wiki",
+                "agwiki materialize --target wiki --dry-run",
+                "agwiki materialize --target skill --prune",
+                "agwiki materialize --target skill --dry-run",
+                "agwiki materialize --target html --out dist/html",
             ],
-            exit_codes: vec![cli_framework::spec::command_tree::ExitCodeEntry {
-                code: 0,
-                description: "Success",
-            }],
+            exit_codes: vec![
+                cli_framework::spec::command_tree::ExitCodeEntry {
+                    code: 0,
+                    description: "Success",
+                },
+                cli_framework::spec::command_tree::ExitCodeEntry {
+                    code: 1,
+                    description: "Unknown/missing target, flag misuse, or materialize errors",
+                },
+            ],
             args: vec![
                 ArgSpec {
-                    name: "subcommand",
-                    kind: ArgKind::Positional,
-                    value_type: ArgValueType::Enum(vec!["skill", "html"]),
+                    name: "target",
+                    kind: ArgKind::Option,
+                    value_type: ArgValueType::String,
                     cardinality: Cardinality::Required,
-                    help: "Export subcommand: skill or html",
+                    help: "Target layout to render: wiki, skill, or html (required; no default)",
                     ..Default::default()
                 },
                 wiki_root_arg(),
+                ArgSpec {
+                    name: "dry-run",
+                    kind: ArgKind::Flag,
+                    value_type: ArgValueType::Bool,
+                    cardinality: Cardinality::Optional,
+                    help: "wiki/skill only: validate and print planned writes without changing files",
+                    ..Default::default()
+                },
                 ArgSpec {
                     name: "skill-root",
                     kind: ArgKind::Option,
                     value_type: ArgValueType::String,
                     cardinality: Cardinality::Optional,
-                    help: "Agent Skill directory (default: <wiki-root>/skill)",
+                    help: "skill only: Agent Skill directory (default: <wiki-root>/skill)",
                     ..Default::default()
                 },
                 ArgSpec {
@@ -845,15 +871,7 @@ impl IntoCommandSpec for ExportArgs {
                     kind: ArgKind::Option,
                     value_type: ArgValueType::String,
                     cardinality: Cardinality::Optional,
-                    help: "SKILL.md path to create or update (default: <skill-root>/SKILL.md)",
-                    ..Default::default()
-                },
-                ArgSpec {
-                    name: "dry-run",
-                    kind: ArgKind::Flag,
-                    value_type: ArgValueType::Bool,
-                    cardinality: Cardinality::Optional,
-                    help: "Print planned copies/prunes and generated index; do not write files",
+                    help: "skill only: SKILL.md path to create or update (default: <skill-root>/SKILL.md)",
                     ..Default::default()
                 },
                 ArgSpec {
@@ -861,7 +879,7 @@ impl IntoCommandSpec for ExportArgs {
                     kind: ArgKind::Flag,
                     value_type: ArgValueType::Bool,
                     cardinality: Cardinality::Optional,
-                    help: "Remove files under skill/references/ when the source .md no longer exists",
+                    help: "skill only: remove files under skill/references/ when the source .md no longer exists",
                     ..Default::default()
                 },
                 ArgSpec {
@@ -869,7 +887,7 @@ impl IntoCommandSpec for ExportArgs {
                     kind: ArgKind::Option,
                     value_type: ArgValueType::String,
                     cardinality: Cardinality::Optional,
-                    help: "Output directory for static HTML export (default: dist/html)",
+                    help: "html only: output directory for static HTML export (default: dist/html)",
                     ..Default::default()
                 },
             ],
@@ -878,17 +896,17 @@ impl IntoCommandSpec for ExportArgs {
     }
 }
 
-impl FromArgValueMap for ExportArgs {
+impl FromArgValueMap for MaterializeArgs {
     fn from_arg_value_map(map: &HashMap<String, ArgValue>) -> Self {
         Self {
-            subcommand: map
-                .get("subcommand")
+            target: map
+                .get("target")
                 .and_then(|v| match v {
                     ArgValue::Str(s) => Some(s.clone()),
                     ArgValue::Enum(s) => Some(s.clone()),
                     _ => None,
                 })
-                .unwrap_or_else(|| panic!("fw bug: missing subcommand")),
+                .unwrap_or_default(),
             wiki_root: map
                 .get("wiki-root")
                 .and_then(|v| {
@@ -899,6 +917,7 @@ impl FromArgValueMap for ExportArgs {
                     }
                 })
                 .map(PathBuf::from),
+            dry_run: matches!(map.get("dry-run"), Some(ArgValue::Bool(true))),
             skill_root: map
                 .get("skill-root")
                 .and_then(|v| {
@@ -919,7 +938,6 @@ impl FromArgValueMap for ExportArgs {
                     }
                 })
                 .map(PathBuf::from),
-            dry_run: matches!(map.get("dry-run"), Some(ArgValue::Bool(true))),
             prune: matches!(map.get("prune"), Some(ArgValue::Bool(true))),
             out: map.get("out").and_then(|v| {
                 if let ArgValue::Str(s) = v {
@@ -932,9 +950,30 @@ impl FromArgValueMap for ExportArgs {
     }
 }
 
-async fn execute_export(args: ExportArgs) -> Result<()> {
-    match args.subcommand.as_str() {
+async fn execute_materialize(args: MaterializeArgs) -> Result<()> {
+    // Resolved wiki root for the after_materialize hook (yielded by each arm).
+    let root: PathBuf = match args.target.as_str() {
+        "wiki" => {
+            if args.skill_root.is_some() || args.skill_md.is_some() || args.prune {
+                anyhow::bail!("--skill-root/--skill-md/--prune are only valid with --target skill");
+            }
+            if args.out.is_some() {
+                anyhow::bail!("--out is only valid with --target html");
+            }
+            let root = resolve_root(args.wiki_root)?;
+            let report = run_compile(CompileOptions {
+                wiki_root: root.clone(),
+                dry_run: args.dry_run,
+            })?;
+            if !report.errors.is_empty() {
+                std::process::exit(1);
+            }
+            root
+        }
         "skill" => {
+            if args.out.is_some() {
+                anyhow::bail!("--out is only valid with --target html");
+            }
             let root = resolve_wiki_root(args.wiki_root)?;
             run_export(ExportOptions {
                 wiki_root: &root,
@@ -943,8 +982,12 @@ async fn execute_export(args: ExportArgs) -> Result<()> {
                 dry_run: args.dry_run,
                 prune: args.prune,
             })?;
+            root
         }
         "html" => {
+            if args.skill_root.is_some() || args.skill_md.is_some() || args.prune {
+                anyhow::bail!("--skill-root/--skill-md/--prune are only valid with --target skill");
+            }
             let root = resolve_root(args.wiki_root)?;
             let out_str = args.out.as_deref().unwrap_or("dist/html");
             let out = PathBuf::from(out_str);
@@ -954,12 +997,32 @@ async fn execute_export(args: ExportArgs) -> Result<()> {
                 root.join(out)
             };
             run_export_html(&root, &out_dir)?;
+            root
         }
-        _ => anyhow::bail!(
-            "unknown subcommand '{}': expected 'skill' or 'html'",
-            args.subcommand
-        ),
-    }
+        other => {
+            let label = if other.is_empty() {
+                "missing".to_string()
+            } else {
+                format!("'{other}'")
+            };
+            anyhow::bail!("unknown --target {label}: expected one of wiki, skill, or html");
+        }
+    };
+
+    // after_materialize: run once the target render succeeds. Hooks are CLI-only
+    // (ADR 0002); loaded from the resolved wiki root's .agwiki/config.toml.
+    let op_cfg = agwiki::config::OperatorConfig::load(&root)?;
+    let env = vec![
+        ("AGWIKI_WIKI_ROOT", root.display().to_string()),
+        ("AGWIKI_TARGET", args.target.clone()),
+    ];
+    agwiki::hooks::run_hook_if_set(
+        &op_cfg.hooks.after_materialize,
+        &root,
+        &env,
+        op_cfg.hooks.continue_on_error,
+    )?;
+
     Ok(())
 }
 
@@ -1097,14 +1160,11 @@ async fn main() -> anyhow::Result<()> {
             path!["new"],
             |_ctx, args| async move { execute_new(args).await },
         )?
-        .register::<CompileArgs, _, _>(path!["compile"], |_ctx, args| async move {
-            execute_compile(args).await
-        })?
         .register::<ServeArgs, _, _>(path!["serve"], |_ctx, args| async move {
             execute_serve(args).await
         })?
-        .register::<ExportArgs, _, _>(path!["export"], |_ctx, args| async move {
-            execute_export(args).await
+        .register::<MaterializeArgs, _, _>(path!["materialize"], |_ctx, args| async move {
+            execute_materialize(args).await
         })?
         .register::<CheckArgs, _, _>(path!["check"], |_ctx, args| async move {
             execute_check(args).await

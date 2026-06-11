@@ -17,6 +17,15 @@
 
 use aikit_sdk::AgentEvent;
 
+/// The decision a dry-run plan makes for a single source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanAction {
+    /// The source would be ingested (agent would run).
+    Ingest,
+    /// The source would be skipped (a matching prior success record exists).
+    Skip,
+}
+
 /// An event emitted by core ingest to a caller-supplied sink.
 ///
 /// The binary crate renders these to terminal output; core does no printing.
@@ -47,6 +56,22 @@ pub enum IngestEvent {
     Skipped {
         /// Stable source identity key that was skipped.
         source_key: String,
+    },
+    /// A dry-run plan decision for a single source (emitted only in `--dry-run`).
+    ///
+    /// No agent runs and the ledger is not written; this records what *would*
+    /// happen. `reason` is a short human/machine string such as
+    /// `"already ingested (external_id)"`, `"already ingested (content)"`, or
+    /// `"new source"`.
+    Planned {
+        /// Stable source identity key.
+        source_key: String,
+        /// The planned action (ingest or skip).
+        action: PlanAction,
+        /// Short reason string for the decision.
+        reason: String,
+        /// Effective external id resolved for this source, if any.
+        external_id: Option<String>,
     },
 }
 

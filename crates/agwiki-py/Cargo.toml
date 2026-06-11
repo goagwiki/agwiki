@@ -1,0 +1,22 @@
+[package]
+name = "agwiki-py"
+version.workspace = true
+edition.workspace = true
+description = "Python bindings for agwiki-core: ingest, materialize, and check a wiki in-process"
+license.workspace = true
+repository.workspace = true
+keywords = ["wiki", "markdown", "agent", "python"]
+categories = ["text-processing"]
+
+[lib]
+name = "agwiki"
+crate-type = ["cdylib"]
+
+[dependencies]
+agwiki-core = { path = "../agwiki-core" }
+anyhow = "1.0"
+pyo3 = { version = "0.28", features = ["extension-module", "abi3-py39"] }
+serde_json = "1.0"
+
+[target.'cfg(target_env = "musl")'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
