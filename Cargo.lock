@@ -21,7 +21,7 @@ dependencies = [
 
 [[package]]
 name = "agwiki"
-version = "0.3.10"
+version = "0.3.11"
 dependencies = [
  "agwiki-core",
  "aikit-sdk",
@@ -47,7 +47,7 @@ dependencies = [
 
 [[package]]
 name = "agwiki-core"
-version = "0.3.10"
+version = "0.3.11"
 dependencies = [
  "aikit-sdk",
  "anyhow",
